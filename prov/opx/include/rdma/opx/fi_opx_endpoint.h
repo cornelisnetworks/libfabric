@@ -91,11 +91,11 @@ void fi_opx_cq_debug(struct fid_cq *cq, char *func, const int line);
  * C requires another indirection for expanding macros since
  * operands of the token pasting operator are not expanded */
 
-#define FI_OPX_MSG_SPECIALIZED_FUNC(LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE) \
-	FI_OPX_MSG_SPECIALIZED_FUNC_(LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE)
+#define FI_OPX_MSG_SPECIALIZED_FUNC(LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE, CTX_SHARING) \
+	FI_OPX_MSG_SPECIALIZED_FUNC_(LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE, CTX_SHARING)
 
-#define FI_OPX_MSG_SPECIALIZED_FUNC_(LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE)                                           \
-	static inline ssize_t fi_opx_send_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE(                        \
+#define FI_OPX_MSG_SPECIALIZED_FUNC_(LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE, CTX_SHARING)                              \
+	static inline ssize_t fi_opx_send_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING(        \
 		struct fid_ep *ep, const void *buf, size_t len, void *desc, fi_addr_t dest_addr, void *context)        \
 	{                                                                                                              \
 		return fi_opx_ep_tx_send(ep, buf, len, desc, dest_addr, 0, context, 0, LOCK, /* lock_required */       \
@@ -103,28 +103,28 @@ void fi_opx_cq_debug(struct fid_cq *cq, char *func, const int line);
 					 1,						     /* is_contiguous */       \
 					 0,						     /* override_flags */      \
 					 0,						     /* flags */               \
-					 CAPS | FI_MSG, RELIABILITY, HFI1_TYPE);                                       \
+					 CAPS | FI_MSG, RELIABILITY, HFI1_TYPE, CTX_SHARING);                          \
 	}                                                                                                              \
-	static inline ssize_t fi_opx_recv_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE(                        \
+	static inline ssize_t fi_opx_recv_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING(        \
 		struct fid_ep *ep, void *buf, size_t len, void *desc, fi_addr_t src_addr, void *context)               \
 	{                                                                                                              \
 		return fi_opx_recv_generic(ep, buf, len, desc, src_addr, 0, (uint64_t) - 1, context, LOCK, AV, FI_MSG, \
-					   RELIABILITY, HFI1_TYPE);                                                    \
+					   RELIABILITY, HFI1_TYPE, CTX_SHARING);                                       \
 	}                                                                                                              \
-	static inline ssize_t fi_opx_inject_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE(                      \
+	static inline ssize_t fi_opx_inject_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING(      \
 		struct fid_ep *ep, const void *buf, size_t len, fi_addr_t dest_addr)                                   \
 	{                                                                                                              \
 		return fi_opx_ep_tx_inject(ep, buf, len, dest_addr, 0, 0, LOCK, /* lock_required */                    \
 					   AV,					/* av_type */                          \
 					   0,					/* flags */                            \
-					   CAPS | FI_MSG, RELIABILITY, HFI1_TYPE);                                     \
+					   CAPS | FI_MSG, RELIABILITY, HFI1_TYPE, CTX_SHARING);                        \
 	}                                                                                                              \
-	static inline ssize_t fi_opx_recvmsg_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE(                     \
+	static inline ssize_t fi_opx_recvmsg_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING(     \
 		struct fid_ep *ep, const struct fi_msg *msg, uint64_t flags)                                           \
 	{                                                                                                              \
-		return fi_opx_recvmsg_generic(ep, msg, flags, LOCK, AV, RELIABILITY, HFI1_TYPE);                       \
+		return fi_opx_recvmsg_generic(ep, msg, flags, LOCK, AV, RELIABILITY, HFI1_TYPE, CTX_SHARING);          \
 	}                                                                                                              \
-	static inline ssize_t fi_opx_senddata_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE(                    \
+	static inline ssize_t fi_opx_senddata_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING(    \
 		struct fid_ep *ep, const void *buf, size_t len, void *desc, uint64_t data, fi_addr_t dest_addr,        \
 		void *context)                                                                                         \
 	{                                                                                                              \
@@ -133,22 +133,22 @@ void fi_opx_cq_debug(struct fid_cq *cq, char *func, const int line);
 					 1,							/* is_contiguous */    \
 					 0,							/* override_flags */   \
 					 FI_REMOTE_CQ_DATA,					/* flags */            \
-					 CAPS | FI_MSG, RELIABILITY, HFI1_TYPE);                                       \
+					 CAPS | FI_MSG, RELIABILITY, HFI1_TYPE, CTX_SHARING);                          \
 	}                                                                                                              \
-	static inline ssize_t fi_opx_injectdata_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE(                  \
+	static inline ssize_t fi_opx_injectdata_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING(  \
 		struct fid_ep *ep, const void *buf, size_t len, uint64_t data, fi_addr_t dest_addr)                    \
 	{                                                                                                              \
 		return fi_opx_ep_tx_inject(ep, buf, len, dest_addr, 0, data, LOCK, /* lock_required */                 \
 					   AV,					   /* av_type */                       \
 					   FI_REMOTE_CQ_DATA,			   /* flags */                         \
-					   CAPS | FI_MSG, RELIABILITY, HFI1_TYPE);                                     \
+					   CAPS | FI_MSG, RELIABILITY, HFI1_TYPE, CTX_SHARING);                        \
 	}
 
-#define FI_OPX_MSG_SPECIALIZED_FUNC_NAME(TYPE, LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE) \
-	FI_OPX_MSG_SPECIALIZED_FUNC_NAME_(TYPE, LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE)
+#define FI_OPX_MSG_SPECIALIZED_FUNC_NAME(TYPE, LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE, CTX_SHARING) \
+	FI_OPX_MSG_SPECIALIZED_FUNC_NAME_(TYPE, LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE, CTX_SHARING)
 
-#define FI_OPX_MSG_SPECIALIZED_FUNC_NAME_(TYPE, LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE) \
-	fi_opx_##TYPE##_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE
+#define FI_OPX_MSG_SPECIALIZED_FUNC_NAME_(TYPE, LOCK, AV, CAPS, RELIABILITY, HFI1_TYPE, CTX_SHARING) \
+	fi_opx_##TYPE##_##LOCK##_##AV##_##CAPS##_##RELIABILITY##_##HFI1_TYPE##_##CTX_SHARING
 
 enum fi_opx_ep_state { FI_OPX_EP_UNINITIALIZED = 0, FI_OPX_EP_INITITALIZED_DISABLED, FI_OPX_EP_INITITALIZED_ENABLED };
 
@@ -2958,7 +2958,7 @@ void fi_opx_ep_do_pending_work(struct fi_opx_ep *opx_ep)
 
 __OPX_FORCE_INLINE__
 void fi_opx_ep_rx_poll_internal(struct fid_ep *ep, const uint64_t caps, const enum ofi_reliability_kind reliability,
-				const uint64_t hdrq_mask, const enum opx_hfi1_type hfi1_type)
+				const uint64_t hdrq_mask, const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	struct fi_opx_ep *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 
@@ -2967,16 +2967,16 @@ void fi_opx_ep_rx_poll_internal(struct fid_ep *ep, const uint64_t caps, const en
 
 	if (OFI_LIKELY(hdrq_mask == FI_OPX_HDRQ_MASK_RUNTIME)) { /* constant compile-time expression */
 		FI_OPX_FABRIC_POLL_MANY(ep, FI_OPX_LOCK_NOT_REQUIRED, rx_caps, OFI_RELIABILITY_KIND_ONLOAD,
-					FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+					FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type, ctx_sharing);
 	} else if (hdrq_mask == FI_OPX_HDRQ_MASK_2048) { /* constant compile-time expression */
 		FI_OPX_FABRIC_POLL_MANY(ep, FI_OPX_LOCK_NOT_REQUIRED, rx_caps, OFI_RELIABILITY_KIND_ONLOAD,
-					FI_OPX_HDRQ_MASK_2048, hfi1_type);
+					FI_OPX_HDRQ_MASK_2048, hfi1_type, ctx_sharing);
 	} else if (hdrq_mask == FI_OPX_HDRQ_MASK_8192) { /* constant compile-time expression */
 		FI_OPX_FABRIC_POLL_MANY(ep, FI_OPX_LOCK_NOT_REQUIRED, rx_caps, OFI_RELIABILITY_KIND_ONLOAD,
-					FI_OPX_HDRQ_MASK_8192, hfi1_type);
+					FI_OPX_HDRQ_MASK_8192, hfi1_type, ctx_sharing);
 	} else {
 		FI_OPX_FABRIC_POLL_MANY(ep, FI_OPX_LOCK_NOT_REQUIRED, rx_caps, OFI_RELIABILITY_KIND_ONLOAD, hdrq_mask,
-					hfi1_type);
+					hfi1_type, ctx_sharing);
 	}
 
 	fi_opx_ep_do_pending_work(opx_ep);
@@ -2990,16 +2990,30 @@ void fi_opx_ep_rx_poll_internal(struct fid_ep *ep, const uint64_t caps, const en
 
 static inline void fi_opx_ep_rx_poll(struct fid_ep *ep, const uint64_t caps,
 				     const enum ofi_reliability_kind reliability, const uint64_t hdrq_mask,
-				     const enum opx_hfi1_type hfi1_type)
+				     const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
-	if (hfi1_type & OPX_HFI1_WFR) {
-		fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_WFR);
-	} else if (hfi1_type & OPX_HFI1_JKR) {
-		fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_JKR);
-	} else if (hfi1_type & OPX_HFI1_JKR_9B) {
-		fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_JKR_9B);
+	if (ctx_sharing) {
+		if (hfi1_type & OPX_HFI1_WFR) {
+			fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_WFR, OPX_CTX_SHARING_ON);
+		} else if (hfi1_type & OPX_HFI1_JKR) {
+			fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_JKR, OPX_CTX_SHARING_ON);
+		} else if (hfi1_type & OPX_HFI1_JKR_9B) {
+			fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_JKR_9B,
+						   OPX_CTX_SHARING_ON);
+		} else {
+			abort();
+		}
 	} else {
-		abort();
+		if (hfi1_type & OPX_HFI1_WFR) {
+			fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_WFR, OPX_CTX_SHARING_OFF);
+		} else if (hfi1_type & OPX_HFI1_JKR) {
+			fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_JKR, OPX_CTX_SHARING_OFF);
+		} else if (hfi1_type & OPX_HFI1_JKR_9B) {
+			fi_opx_ep_rx_poll_internal(ep, caps, reliability, hdrq_mask, OPX_HFI1_JKR_9B,
+						   OPX_CTX_SHARING_OFF);
+		} else {
+			abort();
+		}
 	}
 }
 
@@ -3518,7 +3532,8 @@ ssize_t opx_hfi1_tx_send_try_mp_egr(struct fid_ep *ep, const void *buf, size_t l
 				    const unsigned override_flags, const uint64_t tx_op_flags, const uint64_t caps,
 				    const enum ofi_reliability_kind reliability, const uint64_t do_cq_completion,
 				    const enum fi_hmem_iface hmem_iface, const uint64_t hmem_device,
-				    const uint64_t hmem_handle, const enum opx_hfi1_type hfi1_type)
+				    const uint64_t hmem_handle, const enum opx_hfi1_type hfi1_type,
+				    const bool ctx_sharing)
 {
 	struct fi_opx_ep       *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 	const union fi_opx_addr addr   = {.fi = dest_addr};
@@ -3541,7 +3556,7 @@ ssize_t opx_hfi1_tx_send_try_mp_egr(struct fid_ep *ep, const void *buf, size_t l
 	rc = opx_hfi1_tx_send_mp_egr_first_common(opx_ep, (void **) &buf_bytes_ptr, len, opx_ep->hmem_copy_buf,
 						  pbc_dlid, bth_rx, lrh_dlid, addr, tag, data, lock_required,
 						  tx_op_flags, caps, reliability, &first_packet_psn, hmem_iface,
-						  hmem_device, hmem_handle, hfi1_type);
+						  hmem_device, hmem_handle, hfi1_type, ctx_sharing);
 
 	if (rc != FI_SUCCESS) {
 		FI_OPX_DEBUG_COUNTERS_INC(opx_ep->debug_counters.mp_eager.send_fall_back_to_rzv);
@@ -3570,20 +3585,22 @@ ssize_t opx_hfi1_tx_send_try_mp_egr(struct fid_ep *ep, const void *buf, size_t l
 		if (hfi1_type & (OPX_HFI1_WFR | OPX_HFI1_JKR_9B)) {
 			rc = fi_opx_hfi1_tx_send_mp_egr_nth(opx_ep, (void *) buf_bytes_ptr, payload_offset,
 							    first_packet_psn, pbc_dlid, bth_rx, lrh_dlid, addr,
-							    lock_required, reliability, hfi1_type);
+							    lock_required, reliability, hfi1_type, ctx_sharing);
 		} else {
 			rc = fi_opx_hfi1_tx_send_mp_egr_nth_16B(opx_ep, (void *) buf_bytes_ptr, payload_offset,
 								first_packet_psn, pbc_dlid, bth_rx, lrh_dlid, addr,
-								lock_required, reliability, hfi1_type);
+								lock_required, reliability, hfi1_type, ctx_sharing);
 		}
 
 		if (rc != FI_SUCCESS) {
 			if (rc == -FI_ENOBUFS) {
 				/* Insufficient credits. Try forcing a credit return and retry. */
-				fi_opx_force_credit_return(ep, addr.fi, addr.hfi1_subctxt_rx, caps, hfi1_type);
+				fi_opx_force_credit_return(ep, addr.fi, addr.hfi1_subctxt_rx, caps, hfi1_type,
+							   ctx_sharing);
 				FI_OPX_DEBUG_COUNTERS_INC(opx_ep->debug_counters.mp_eager.send_nth_force_cr);
 			} else {
-				fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+				fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type,
+						  ctx_sharing);
 				FI_OPX_DEBUG_COUNTERS_INC(
 					opx_ep->debug_counters.mp_eager.send_full_replay_buffer_rx_poll);
 			}
@@ -3593,18 +3610,19 @@ ssize_t opx_hfi1_tx_send_try_mp_egr(struct fid_ep *ep, const void *buf, size_t l
 					rc = fi_opx_hfi1_tx_send_mp_egr_nth(opx_ep, (void *) buf_bytes_ptr,
 									    payload_offset, first_packet_psn, pbc_dlid,
 									    bth_rx, lrh_dlid, addr, lock_required,
-									    reliability, hfi1_type);
+									    reliability, hfi1_type, ctx_sharing);
 				} else {
-					rc = fi_opx_hfi1_tx_send_mp_egr_nth_16B(opx_ep, (void *) buf_bytes_ptr,
-										payload_offset, first_packet_psn,
-										pbc_dlid, bth_rx, lrh_dlid, addr,
-										lock_required, reliability, hfi1_type);
+					rc = fi_opx_hfi1_tx_send_mp_egr_nth_16B(
+						opx_ep, (void *) buf_bytes_ptr, payload_offset, first_packet_psn,
+						pbc_dlid, bth_rx, lrh_dlid, addr, lock_required, reliability, hfi1_type,
+						ctx_sharing);
 				}
 
 				if (rc == -FI_EAGAIN) {
 					FI_OPX_DEBUG_COUNTERS_INC(
 						opx_ep->debug_counters.mp_eager.send_full_replay_buffer_rx_poll);
-					fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+					fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type,
+							  ctx_sharing);
 				}
 			} while (rc != FI_SUCCESS);
 		}
@@ -3626,22 +3644,24 @@ ssize_t opx_hfi1_tx_send_try_mp_egr(struct fid_ep *ep, const void *buf, size_t l
 			"===================================== SEND, HFI -- MULTI-PACKET EAGER USER LAST (payload_remaining %zu)\n",
 			payload_remaining);
 		if (hfi1_type & (OPX_HFI1_WFR | OPX_HFI1_JKR_9B)) {
-			rc = fi_opx_hfi1_tx_send_mp_egr_last(opx_ep, (void *) buf_bytes_ptr, payload_offset,
-							     payload_remaining, first_packet_psn, pbc_dlid, bth_rx,
-							     lrh_dlid, addr, lock_required, reliability, hfi1_type);
+			rc = fi_opx_hfi1_tx_send_mp_egr_last(
+				opx_ep, (void *) buf_bytes_ptr, payload_offset, payload_remaining, first_packet_psn,
+				pbc_dlid, bth_rx, lrh_dlid, addr, lock_required, reliability, hfi1_type, ctx_sharing);
 		} else {
-			rc = fi_opx_hfi1_tx_send_mp_egr_last_16B(opx_ep, (void *) buf_bytes_ptr, payload_offset,
-								 payload_remaining, first_packet_psn, pbc_dlid, bth_rx,
-								 lrh_dlid, addr, lock_required, reliability, hfi1_type);
+			rc = fi_opx_hfi1_tx_send_mp_egr_last_16B(
+				opx_ep, (void *) buf_bytes_ptr, payload_offset, payload_remaining, first_packet_psn,
+				pbc_dlid, bth_rx, lrh_dlid, addr, lock_required, reliability, hfi1_type, ctx_sharing);
 		}
 
 		if (rc != FI_SUCCESS) {
 			if (rc == -FI_ENOBUFS) {
 				/* Insufficient credits. Try forcing a credit return and retry. */
-				fi_opx_force_credit_return(ep, addr.fi, addr.hfi1_subctxt_rx, caps, hfi1_type);
+				fi_opx_force_credit_return(ep, addr.fi, addr.hfi1_subctxt_rx, caps, hfi1_type,
+							   ctx_sharing);
 				FI_OPX_DEBUG_COUNTERS_INC(opx_ep->debug_counters.mp_eager.send_nth_force_cr);
 			} else {
-				fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+				fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type,
+						  ctx_sharing);
 				FI_OPX_DEBUG_COUNTERS_INC(
 					opx_ep->debug_counters.mp_eager.send_full_replay_buffer_rx_poll);
 			}
@@ -3651,17 +3671,18 @@ ssize_t opx_hfi1_tx_send_try_mp_egr(struct fid_ep *ep, const void *buf, size_t l
 					rc = fi_opx_hfi1_tx_send_mp_egr_last(
 						opx_ep, (void *) buf_bytes_ptr, payload_offset, payload_remaining,
 						first_packet_psn, pbc_dlid, bth_rx, lrh_dlid, addr, lock_required,
-						reliability, hfi1_type);
+						reliability, hfi1_type, ctx_sharing);
 				} else {
 					rc = fi_opx_hfi1_tx_send_mp_egr_last_16B(
 						opx_ep, (void *) buf_bytes_ptr, payload_offset, payload_remaining,
 						first_packet_psn, pbc_dlid, bth_rx, lrh_dlid, addr, lock_required,
-						reliability, hfi1_type);
+						reliability, hfi1_type, ctx_sharing);
 				}
 				if (rc == -FI_EAGAIN) {
 					FI_OPX_DEBUG_COUNTERS_INC(
 						opx_ep->debug_counters.mp_eager.send_full_replay_buffer_rx_poll);
-					fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+					fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type,
+							  ctx_sharing);
 				}
 			} while (rc != FI_SUCCESS);
 		}
@@ -3694,17 +3715,18 @@ ssize_t opx_ep_tx_send_try_eager(struct fid_ep *ep, const void *buf, size_t len,
 				 const enum ofi_reliability_kind reliability, const uint64_t do_cq_completion,
 				 const enum fi_hmem_iface hmem_iface, const uint64_t hmem_device,
 				 const uint64_t hmem_handle, const bool mp_eager_fallback,
-				 const enum opx_hfi1_type hfi1_type)
+				 const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	ssize_t rc;
 	if (is_contiguous) {
 		rc = OPX_FABRIC_TX_SEND_EGR(ep, buf, len, addr.fi, tag, context, data, lock_required, override_flags,
 					    tx_op_flags, addr.hfi1_subctxt_rx, caps, reliability, do_cq_completion,
-					    hmem_iface, hmem_device, hmem_handle, hfi1_type);
+					    hmem_iface, hmem_device, hmem_handle, hfi1_type, ctx_sharing);
 	} else {
 		rc = OPX_FABRIC_TX_SENDV_EGR(ep, local_iov, niov, total_len, addr.fi, tag, context, data, lock_required,
 					     override_flags, tx_op_flags, addr.hfi1_subctxt_rx, caps, reliability,
-					     do_cq_completion, hmem_iface, hmem_device, hmem_handle, hfi1_type);
+					     do_cq_completion, hmem_iface, hmem_device, hmem_handle, hfi1_type,
+					     ctx_sharing);
 	}
 	if (OFI_LIKELY(rc == FI_SUCCESS)) {
 		return rc;
@@ -3720,11 +3742,11 @@ ssize_t opx_ep_tx_send_try_eager(struct fid_ep *ep, const void *buf, size_t len,
 
 	if (rc == -FI_ENOBUFS) {
 		/* Insufficient credits. Try forcing a credit return and retry. */
-		fi_opx_force_credit_return(ep, addr.fi, addr.hfi1_subctxt_rx, caps, hfi1_type);
+		fi_opx_force_credit_return(ep, addr.fi, addr.hfi1_subctxt_rx, caps, hfi1_type, ctx_sharing);
 	} else {
 		/* Likely full replay buffers or waiting for reliability handshake init.
 		   A poll might help */
-		fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+		fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type, ctx_sharing);
 	}
 
 	/* Note that we'll only iterate this loop more than once if we got here
@@ -3735,14 +3757,14 @@ ssize_t opx_ep_tx_send_try_eager(struct fid_ep *ep, const void *buf, size_t len,
 			rc = OPX_FABRIC_TX_SEND_EGR(ep, buf, len, addr.fi, tag, context, data, lock_required,
 						    override_flags, tx_op_flags, addr.hfi1_subctxt_rx, caps,
 						    reliability, do_cq_completion, hmem_iface, hmem_device, hmem_handle,
-						    hfi1_type);
+						    hfi1_type, ctx_sharing);
 		} else {
 			rc = OPX_FABRIC_TX_SENDV_EGR(ep, local_iov, niov, total_len, addr.fi, tag, context, data,
 						     lock_required, override_flags, tx_op_flags, addr.hfi1_subctxt_rx,
 						     caps, reliability, do_cq_completion, hmem_iface, hmem_device,
-						     hmem_handle, hfi1_type);
+						     hmem_handle, hfi1_type, ctx_sharing);
 		}
-		fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+		fi_opx_ep_rx_poll(ep, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type, ctx_sharing);
 	} while (rc == -FI_ENOBUFS && loop++ < FI_OPX_EP_TX_SEND_EAGER_MAX_RETRIES);
 
 	return rc;
@@ -3755,7 +3777,7 @@ ssize_t opx_ep_tx_send_rzv(struct fid_ep *ep, const void *buf, size_t len, const
 			   const unsigned override_flags, const uint64_t tx_op_flags, const uint64_t caps,
 			   const enum ofi_reliability_kind reliability, const uint64_t do_cq_completion,
 			   const enum fi_hmem_iface hmem_iface, const uint64_t hmem_device, const uint64_t hmem_handle,
-			   const enum opx_hfi1_type hfi1_type)
+			   const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	struct fi_opx_ep *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 	ssize_t		  rc;
@@ -3765,16 +3787,17 @@ ssize_t opx_ep_tx_send_rzv(struct fid_ep *ep, const void *buf, size_t len, const
 			rc = OPX_FABRIC_TX_SEND_RZV(ep, buf, len, addr.fi, tag, context, data, lock_required,
 						    override_flags, tx_op_flags, addr.hfi1_subctxt_rx, caps,
 						    reliability, do_cq_completion, hmem_iface, hmem_device, hmem_handle,
-						    hfi1_type);
+						    hfi1_type, ctx_sharing);
 		} else {
 			rc = OPX_FABRIC_TX_SENDV_RZV(ep, local_iov, niov, total_len, addr.fi, tag, context, data,
 						     lock_required, override_flags, tx_op_flags, addr.hfi1_subctxt_rx,
 						     caps, reliability, do_cq_completion, hmem_iface, hmem_device,
-						     hmem_handle, hfi1_type);
+						     hmem_handle, hfi1_type, ctx_sharing);
 		}
 
 		if (OFI_UNLIKELY(rc == -EAGAIN)) {
-			fi_opx_ep_rx_poll(&opx_ep->ep_fid, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+			fi_opx_ep_rx_poll(&opx_ep->ep_fid, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type,
+					  ctx_sharing);
 		}
 	} while (rc == -EAGAIN);
 
@@ -3787,7 +3810,7 @@ static inline ssize_t fi_opx_ep_tx_send_internal(struct fid_ep *ep, const void *
 						 const unsigned is_contiguous, const unsigned override_flags,
 						 const uint64_t tx_op_flags, const uint64_t caps,
 						 const enum ofi_reliability_kind reliability,
-						 const enum opx_hfi1_type	 hfi1_type)
+						 const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	FI_DBG_TRACE(fi_opx_global.prov, FI_LOG_EP_DATA, "===================================== SEND (begin)\n");
 	OPX_TRACER_TRACE(OPX_TRACER_BEGIN, "SEND");
@@ -3853,7 +3876,7 @@ static inline ssize_t fi_opx_ep_tx_send_internal(struct fid_ep *ep, const void *
 			rc = opx_ep_tx_send_try_eager(ep, buf, len, addr, tag, context, local_iov, niov, total_len,
 						      data, lock_required, is_contiguous, override_flags, tx_op_flags,
 						      caps, reliability, do_cq_completion, hmem_iface, hmem_device,
-						      hmem_handle, mp_eager_fallback, hfi1_type);
+						      hmem_handle, mp_eager_fallback, hfi1_type, ctx_sharing);
 			if (OFI_LIKELY(rc == FI_SUCCESS)) {
 				OPX_TRACER_TRACE(OPX_TRACER_END_SUCCESS, "SEND");
 				FI_DBG_TRACE(fi_opx_global.prov, FI_LOG_EP_DATA,
@@ -3873,7 +3896,7 @@ static inline ssize_t fi_opx_ep_tx_send_internal(struct fid_ep *ep, const void *
 			rc = opx_hfi1_tx_send_try_mp_egr(ep, buf, len, addr.fi, tag, context, data, lock_required,
 							 override_flags, tx_op_flags, caps, reliability,
 							 do_cq_completion, FI_HMEM_SYSTEM, 0ul, OPX_HMEM_NO_HANDLE,
-							 hfi1_type);
+							 hfi1_type, ctx_sharing);
 			if (OFI_LIKELY(rc == FI_SUCCESS)) {
 				OPX_TRACER_TRACE(OPX_TRACER_END_SUCCESS, "SEND");
 				FI_DBG_TRACE(fi_opx_global.prov, FI_LOG_EP_DATA,
@@ -3899,7 +3922,7 @@ static inline ssize_t fi_opx_ep_tx_send_internal(struct fid_ep *ep, const void *
 
 	rc = opx_ep_tx_send_rzv(ep, buf, len, addr, tag, context, local_iov, niov, total_len, data, lock_required,
 				is_contiguous, override_flags, tx_op_flags, caps, reliability, do_cq_completion,
-				hmem_iface, hmem_device, hmem_handle, hfi1_type);
+				hmem_iface, hmem_device, hmem_handle, hfi1_type, ctx_sharing);
 
 	OPX_TRACER_TRACE(OPX_TRACER_END_SUCCESS, "SEND");
 	FI_DBG_TRACE(fi_opx_global.prov, FI_LOG_EP_DATA, "===================================== SEND (end)\n");
@@ -3912,7 +3935,7 @@ ssize_t fi_opx_ep_tx_send(struct fid_ep *ep, const void *buf, size_t len, void *
 			  void *context, const uint32_t data, const int lock_required, const enum fi_av_type av_type,
 			  const unsigned is_contiguous, const unsigned override_flags, const uint64_t tx_op_flags,
 			  const uint64_t caps, const enum ofi_reliability_kind reliability,
-			  const enum opx_hfi1_type hfi1_type)
+			  const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	struct fi_opx_ep *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 
@@ -3920,7 +3943,7 @@ ssize_t fi_opx_ep_tx_send(struct fid_ep *ep, const void *buf, size_t len, void *
 
 	ssize_t rc = fi_opx_ep_tx_send_internal(ep, buf, len, desc, dest_addr, tag, context, data,
 						FI_OPX_LOCK_NOT_REQUIRED, av_type, is_contiguous, override_flags,
-						tx_op_flags, caps, reliability, hfi1_type);
+						tx_op_flags, caps, reliability, hfi1_type, ctx_sharing);
 
 	fi_opx_unlock_if_required(&opx_ep->lock, lock_required);
 
@@ -3931,7 +3954,8 @@ __OPX_FORCE_INLINE__
 ssize_t fi_opx_ep_tx_inject_internal(struct fid_ep *ep, const void *buf, size_t len, fi_addr_t dest_addr, uint64_t tag,
 				     const uint32_t data, const int lock_required, const enum fi_av_type av_type,
 				     const uint64_t tx_op_flags, const uint64_t caps,
-				     const enum ofi_reliability_kind reliability, const enum opx_hfi1_type hfi1_type)
+				     const enum ofi_reliability_kind reliability, const enum opx_hfi1_type hfi1_type,
+				     const bool ctx_sharing)
 {
 	// Exactly one of FI_MSG or FI_TAGGED should be on
 	assert((caps & (FI_MSG | FI_TAGGED)) && ((caps & (FI_MSG | FI_TAGGED)) != (FI_MSG | FI_TAGGED)));
@@ -3948,7 +3972,7 @@ ssize_t fi_opx_ep_tx_inject_internal(struct fid_ep *ep, const void *buf, size_t 
 						  0,	// data
 						  lock_required, av_type, OPX_CONTIG_TRUE, OPX_FLAGS_OVERRIDE_TRUE,
 						  FI_SELECTIVE_COMPLETION, // op flags to turn off context
-						  caps, reliability, hfi1_type);
+						  caps, reliability, hfi1_type, ctx_sharing);
 	} else {
 		assert(len <= FI_OPX_HFI1_PACKET_IMM);
 	}
@@ -3969,15 +3993,17 @@ ssize_t fi_opx_ep_tx_inject_internal(struct fid_ep *ep, const void *buf, size_t 
 	assert((FI_AV_TABLE == opx_ep->av_type) || (FI_AV_MAP == opx_ep->av_type));
 	const union fi_opx_addr addr = FI_OPX_EP_AV_ADDR(av_type, opx_ep, dest_addr);
 
-	const ssize_t rc = FI_OPX_FABRIC_TX_INJECT(ep, buf, len, addr.fi, tag, data, lock_required,
-						   addr.hfi1_subctxt_rx, tx_op_flags, caps, reliability, hfi1_type);
+	const ssize_t rc =
+		FI_OPX_FABRIC_TX_INJECT(ep, buf, len, addr.fi, tag, data, lock_required, addr.hfi1_subctxt_rx,
+					tx_op_flags, caps, reliability, hfi1_type, ctx_sharing);
 
 	if (OFI_UNLIKELY(rc == -EAGAIN)) {
 		// In this case we are probably out of replay buffers. To deal
 		// with this, we do a poll which may send a ping and will
 		// process any incoming ACKs, hopefully releasing a buffer for
 		// reuse.
-		fi_opx_ep_rx_poll(&opx_ep->ep_fid, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type);
+		fi_opx_ep_rx_poll(&opx_ep->ep_fid, 0, OPX_RELIABILITY, FI_OPX_HDRQ_MASK_RUNTIME, hfi1_type,
+				  ctx_sharing);
 	}
 
 	OPX_TRACER_TRACE(OPX_TRACER_END_SUCCESS, "INJECT");
@@ -3990,14 +4016,15 @@ __OPX_FORCE_INLINE__
 ssize_t fi_opx_ep_tx_inject(struct fid_ep *ep, const void *buf, size_t len, fi_addr_t dest_addr, uint64_t tag,
 			    const uint32_t data, const int lock_required, const enum fi_av_type av_type,
 			    const uint64_t tx_op_flags, const uint64_t caps,
-			    const enum ofi_reliability_kind reliability, const enum opx_hfi1_type hfi1_type)
+			    const enum ofi_reliability_kind reliability, const enum opx_hfi1_type hfi1_type,
+			    const bool ctx_sharing)
 {
 	struct fi_opx_ep *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 
 	fi_opx_lock_if_required(&opx_ep->lock, lock_required);
 
 	ssize_t rc = fi_opx_ep_tx_inject_internal(ep, buf, len, dest_addr, tag, data, FI_OPX_LOCK_NOT_REQUIRED, av_type,
-						  tx_op_flags, caps, reliability, hfi1_type);
+						  tx_op_flags, caps, reliability, hfi1_type, ctx_sharing);
 
 	fi_opx_unlock_if_required(&opx_ep->lock, lock_required);
 
@@ -4008,7 +4035,7 @@ __OPX_FORCE_INLINE__
 ssize_t fi_opx_recv_generic(struct fid_ep *ep, void *buf, size_t len, void *desc, fi_addr_t src_addr, uint64_t tag,
 			    uint64_t ignore, void *context, const int lock_required, const enum fi_av_type av_type,
 			    const uint64_t static_flags, const enum ofi_reliability_kind reliability,
-			    const enum opx_hfi1_type hfi1_type)
+			    const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	struct fi_opx_ep *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 
@@ -4024,7 +4051,7 @@ ssize_t fi_opx_recv_generic(struct fid_ep *ep, void *buf, size_t len, void *desc
 __OPX_FORCE_INLINE__
 ssize_t fi_opx_recvmsg_generic(struct fid_ep *ep, const struct fi_msg *msg, uint64_t flags, const int lock_required,
 			       const enum fi_av_type av_type, const enum ofi_reliability_kind reliability,
-			       const enum opx_hfi1_type hfi1_type)
+			       const enum opx_hfi1_type hfi1_type, const bool ctx_sharing)
 {
 	struct fi_opx_ep *opx_ep = container_of(ep, struct fi_opx_ep, ep_fid);
 
