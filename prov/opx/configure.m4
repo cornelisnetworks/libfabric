@@ -209,8 +209,6 @@ AC_DEFUN([FI_OPX_CONFIGURE],[
 			])
 		])
 		AS_IF([test $opx_happy -eq 1],[
-			save_CPPFLAGS=$CPPFLAGS
-			CPPFLAGS="-I/usr/include/uapi"
 			AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
 				[[#include <rdma/hfi/hfi1_user.h>]],
 				[[
@@ -221,7 +219,6 @@ AC_DEFUN([FI_OPX_CONFIGURE],[
 				[
 				AC_MSG_NOTICE([hfi1_user.h hfi1_status_v2 defined... no, no support for JKR])
 				])
-			CPPFLAGS=$save_CPPFLAGS
 		])
 	])
 
