@@ -442,20 +442,20 @@ struct fi_opx_ep_daos_info {
 struct fi_opx_ep {
 	/* == CACHE LINE 0,1 == */
 	struct fid_ep			   ep_fid; /* 10 qws */
+	uint64_t			   rpc_reserved;
 	struct fi_opx_ep_tx		  *tx;
 	struct fi_opx_ep_rx		  *rx;
 	struct fi_opx_reliability_service *reli_service; /* ONLOAD only */
 	struct fi_opx_cntr		  *read_cntr;
 	struct fi_opx_cntr		  *write_cntr;
-	struct fi_opx_cntr		  *send_cntr;
 
 	/* == CACHE LINE 2 == */
 	struct fi_opx_cntr    *recv_cntr;
+	struct fi_opx_cntr    *send_cntr;
 	struct fi_opx_domain  *domain;
 	struct opx_tid_domain *tid_domain;
 	struct ofi_bufpool    *rma_counter_pool;
 	struct ofi_bufpool    *rzv_completion_pool;
-	void		      *mem;
 	struct fi_opx_av      *av;
 	struct fi_opx_sep     *sep;
 
@@ -496,7 +496,7 @@ struct fi_opx_ep {
 	uint32_t		   unused_cacheline5_u32;
 	ofi_spin_t		   lock; /* lock size varies based on ENABLE_DEBUG*/
 
-	/* == CACHE LINE 6 (if ENABLE_DEBUG) == */
+	/* == CACHE LINE 6 == */
 
 #ifdef FLIGHT_RECORDER_ENABLE
 	struct flight_recorder *fr;
@@ -504,6 +504,7 @@ struct fi_opx_ep {
 
 	FI_OPX_DEBUG_COUNTERS_DECLARE_COUNTERS;
 
+	void *mem;
 } __attribute((aligned(L2_CACHE_LINE_SIZE)));
 
 OPX_COMPILE_TIME_ASSERT(offsetof(struct fi_opx_ep, recv_cntr) == (FI_OPX_CACHE_LINE_SIZE * 2),
