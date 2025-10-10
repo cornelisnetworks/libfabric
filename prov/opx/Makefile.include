@@ -83,11 +83,6 @@ opx_CPPFLAGS +=									\
 
 opx_LIBS = -luuid -lnuma
 
-if OPX_HFISVC
-opx_files += prov/opx/modules/hfisvc_client/source/hfisvc_client.c
-opx_CPPFLAGS += -I$(srcdir)/prov/opx/modules/hfisvc_client/include
-endif
-
 if HAVE_OPX_DL
 pkglib_LTLIBRARIES += libopx-fi.la
 libopx_fi_la_SOURCES = $(opx_files) $(common_srcs)
