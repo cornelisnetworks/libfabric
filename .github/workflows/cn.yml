@@ -30,6 +30,9 @@ jobs:
     needs: [smoke-test, prechecks]
     if: "${{ github.repository == 'cornelisnetworks/libfabric-internal' && contains(github.event.pull_request.labels.*.name, 'CI: Full Suite') }}"
     uses: cornelisnetworks/libfabric-devel/.github/workflows/ci-opa100.yml@master
+    with:
+      sha: sha=${{ github.event.pull_request.head.sha }}
+      run-type: "CI"
     secrets:
       OPXR_ELASTICSEARCH_CREDENTIALS: ${{ secrets.OPXR_ELASTICSEARCH_CREDENTIALS }}
   cn5000:
@@ -37,6 +40,9 @@ jobs:
     needs: [smoke-test, prechecks]
     if: "${{ github.repository == 'cornelisnetworks/libfabric-internal' && contains(github.event.pull_request.labels.*.name, 'CI: Full Suite') }}"
     uses: cornelisnetworks/libfabric-devel/.github/workflows/ci-cn5000.yml@master
+    with:
+      sha: sha=${{ github.event.pull_request.head.sha }}
+      run-type: "CI"
     secrets:
       OPXR_ELASTICSEARCH_CREDENTIALS: ${{ secrets.OPXR_ELASTICSEARCH_CREDENTIALS }}
   cleanup:
