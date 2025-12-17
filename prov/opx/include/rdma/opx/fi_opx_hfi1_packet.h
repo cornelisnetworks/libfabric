@@ -1525,7 +1525,7 @@ union opx_hfisvc_iov {
 	};
 } __attribute__((__packed__));
 
-#define OPX_MAX_HFISVC_IOVS (OPX_HFI1_MAX_PKT_SIZE / sizeof(union opx_hfisvc_iov))
+#define OPX_MAX_HFISVC_IOVS ((OPX_HFI1_MAX_PKT_SIZE - sizeof(uintptr_t)) / sizeof(union opx_hfisvc_iov))
 
 struct fi_opx_hmem_iov {
 	uintptr_t	   buf;
@@ -1637,6 +1637,7 @@ union fi_opx_hfi1_packet_payload {
 		} ipc;
 
 		struct {
+			uintptr_t	     rzv_comp_vaddr; // struct fi_opx_rzv_completion * - imm_data for notify
 			union opx_hfisvc_iov iovs[OPX_MAX_HFISVC_IOVS];
 		} hfisvc;
 	} rendezvous;
