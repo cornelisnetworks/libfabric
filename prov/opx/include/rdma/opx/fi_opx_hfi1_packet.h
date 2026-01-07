@@ -1124,11 +1124,6 @@ union opx_hfi1_packet_hdr {
 	(((union opx_hfi1_packet_hdr *) _hdr)->lrh_16b.slid20 << 20 | \
 	 ((union opx_hfi1_packet_hdr *) _hdr)->lrh_16b.slid)
 
-#define OPX_HDR_SLID_9B(_hdr) ((union opx_hfi1_packet_hdr *) _hdr)->lrh_9b.slid
-#define OPX_HDR_SLID_16B(_hdr)                                        \
-	(((union opx_hfi1_packet_hdr *) _hdr)->lrh_16b.slid20 << 20 | \
-	 ((union opx_hfi1_packet_hdr *) _hdr)->lrh_16b.slid)
-
 static_assert(sizeof(union opx_hfi1_packet_hdr) == sizeof(uint64_t[15]),
 	      "sizeof(union opx_hfi1_packet_hdr) must be 15 qwords!");
 
