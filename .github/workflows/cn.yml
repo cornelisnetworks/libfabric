@@ -18,6 +18,8 @@ jobs:
     name: Prechecks
     if: ${{ github.repository == 'cornelisnetworks/libfabric-internal' }}
     uses: cornelisnetworks/libfabric-devel/.github/workflows/ci-prechecks.yml@master
+    secrets:
+      CN_OPX_BOT_PAT: ${{ secrets.CN_OPX_BOT_PAT }}
   smoke-test:
     name: Smoke Test
     if:  ${{ github.repository == 'cornelisnetworks/libfabric-internal' }}
