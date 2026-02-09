@@ -19,6 +19,7 @@
 #include "efa_rdm_srx.h"
 #include "efa_rdm_cq.h"
 #include "efa_rdm_pke_nonreq.h"
+#include "efa_rdm_pke_rtw.h"
 
 struct efa_ep_addr *efa_rdm_ep_raw_addr(struct efa_rdm_ep *ep)
 {
@@ -44,48 +45,26 @@ int32_t efa_rdm_ep_get_peer_ahn(struct efa_rdm_ep *ep, fi_addr_t addr)
 	return efa_conn ? efa_conn->ah->ahn : -1;
 }
 
-inline int
-efa_rdm_ep_peer_map_insert(struct efa_rdm_ep_peer_map_entry **peer_map,
-			   fi_addr_t addr,
-			   struct efa_rdm_ep_peer_map_entry *map_entry)
+/**
+ * @brief get pointer to efa_rdm_peer structure for a given libfabric address in
+ * the explicit AV
+ *
+ * @param[in]		ep		endpoint
+ * @param[in]		addr 		libfabric address
+ * @returns pointer to #efa_rdm_peer
+ */
+struct efa_rdm_peer *efa_rdm_ep_get_peer(struct efa_rdm_ep *ep, fi_addr_t addr)
 {
-	HASH_ADD(hndl, *peer_map, addr, sizeof(addr), map_entry);
-	return FI_SUCCESS;
-}
-
-inline struct efa_rdm_peer *
-efa_rdm_ep_peer_map_lookup(struct efa_rdm_ep_peer_map_entry **peer_map,
-			   fi_addr_t addr)
-{
-	struct efa_rdm_ep_peer_map_entry *map_entry;
-
-	HASH_FIND(hndl, *peer_map, &addr, sizeof(addr), map_entry);
-
-	return map_entry ? &map_entry->peer : NULL;
-}
-
-void efa_rdm_ep_peer_map_remove(struct efa_rdm_ep_peer_map_entry **peer_map,
-				fi_addr_t addr)
-{
-	struct efa_rdm_ep_peer_map_entry *map_entry = NULL;
-
-	HASH_FIND(hndl, *peer_map, &addr, sizeof(addr), map_entry);
-	assert(map_entry);
-	HASH_DELETE(hndl, *peer_map, map_entry);
-	ofi_buf_free(map_entry);
-}
-
-static inline struct efa_rdm_peer *
-efa_rdm_ep_get_peer_impl(struct efa_rdm_ep *ep, struct efa_rdm_ep_peer_map_entry **peer_map, fi_addr_t addr, struct efa_conn *conn)
-{
-	struct efa_rdm_ep_peer_map_entry *map_entry;
+	struct efa_conn *conn;
+	struct efa_conn_ep_peer_map_entry *map_entry;
 	struct efa_rdm_peer *peer;
-	int err;
+
+	conn = efa_av_addr_to_conn(ep->base_ep.av, addr);
 
 	if (OFI_UNLIKELY(addr == FI_ADDR_NOTAVAIL))
 		return NULL;
 
-	peer = efa_rdm_ep_peer_map_lookup(peer_map, addr);
+	peer = efa_conn_ep_peer_map_lookup(conn, ep);
 	if (peer)
 		return peer;
 
@@ -98,32 +77,15 @@ efa_rdm_ep_get_peer_impl(struct efa_rdm_ep *ep, struct efa_rdm_ep_peer_map_entry
 	}
 
 	memset(map_entry, 0, sizeof(*map_entry));
-
-	map_entry->addr = addr;
+	map_entry->ep_ptr = ep;
 
 	efa_rdm_peer_construct(&map_entry->peer, ep, conn);
 
-	err = efa_rdm_ep_peer_map_insert(peer_map, addr, map_entry);
-	if (err)
-		return NULL;
+	efa_conn_ep_peer_map_insert(conn, map_entry);
+
+	dlist_insert_tail(&map_entry->peer.ep_peer_list_entry, &ep->ep_peer_list);
 
 	return &map_entry->peer;
-}
-
-/**
- * @brief get pointer to efa_rdm_peer structure for a given libfabric address in
- * the explicit AV
- *
- * @param[in]		ep		endpoint
- * @param[in]		addr 		libfabric address
- * @returns pointer to #efa_rdm_peer
- */
-struct efa_rdm_peer *efa_rdm_ep_get_peer(struct efa_rdm_ep *ep, fi_addr_t addr)
-{
-	struct efa_conn *conn;
-
-	conn = efa_av_addr_to_conn(ep->base_ep.av, addr);
-	return efa_rdm_ep_get_peer_impl(ep, &ep->fi_addr_to_peer_map, addr, conn);
 }
 
 /**
@@ -137,28 +99,43 @@ struct efa_rdm_peer *efa_rdm_ep_get_peer(struct efa_rdm_ep *ep, fi_addr_t addr)
 struct efa_rdm_peer *efa_rdm_ep_get_peer_implicit(struct efa_rdm_ep *ep, fi_addr_t addr)
 {
 	struct efa_conn *conn;
+	struct efa_rdm_peer *peer;
+	struct efa_conn_ep_peer_map_entry *map_entry;
+
+	assert(ofi_genlock_held(&ep->base_ep.domain->srx_lock));
 
 	conn = efa_av_addr_to_conn_implicit(ep->base_ep.av, addr);
-	return efa_rdm_ep_get_peer_impl(ep, &ep->fi_addr_to_peer_map_implicit, addr, conn);
-}
 
-void efa_rdm_ep_peer_map_implicit_to_explicit(struct efa_rdm_ep *ep,
-					      struct efa_rdm_peer *peer,
-					      fi_addr_t implicit_fi_addr,
-					      fi_addr_t explicit_fi_addr)
-{
-	struct efa_rdm_ep_peer_map_entry *map_entry;
+	if (OFI_UNLIKELY(addr == FI_ADDR_NOTAVAIL))
+		return NULL;
 
-	HASH_FIND(hndl, ep->fi_addr_to_peer_map_implicit, &implicit_fi_addr, sizeof(implicit_fi_addr), map_entry);
-	assert(map_entry);
-	assert(peer == &map_entry->peer);
-	assert(implicit_fi_addr == map_entry->addr);
+	peer = efa_conn_ep_peer_map_lookup(conn, ep);
+	if (peer)
+		goto out;
 
-	HASH_DELETE(hndl, ep->fi_addr_to_peer_map_implicit, map_entry);
-	assert(map_entry);
-	map_entry->addr = explicit_fi_addr;
+	EFA_INFO(FI_LOG_EP_DATA, "Creating peer for addr %lu\n", addr);
+	map_entry = ofi_buf_alloc(ep->peer_map_entry_pool);
+	if (OFI_UNLIKELY(!map_entry)) {
+		EFA_WARN(FI_LOG_EP_DATA,
+			"Map entries for fi_addr to peer mapping exhausted.\n");
+		return NULL;
+	}
 
-	HASH_ADD(hndl, ep->fi_addr_to_peer_map, addr, sizeof(explicit_fi_addr), map_entry);
+	memset(map_entry, 0, sizeof(*map_entry));
+	map_entry->ep_ptr = ep;
+
+	efa_rdm_peer_construct(&map_entry->peer, ep, conn);
+	peer = &map_entry->peer;
+
+	efa_conn_ep_peer_map_insert(conn, map_entry);
+
+	dlist_insert_tail(&map_entry->peer.ep_peer_list_entry, &ep->ep_peer_list);
+
+out:
+	assert(peer);
+	/* Move to the front of the LRU list */
+	efa_av_implicit_av_lru_conn_move(ep->base_ep.av, peer->conn);
+	return peer;
 }
 
 /**
@@ -382,9 +359,11 @@ void efa_rdm_ep_record_tx_op_submitted(struct efa_rdm_ep *ep, struct efa_rdm_pke
 	 * and the RMA is a local read toward the endpoint itself
 	 */
 	peer = ope->peer;
-	if (peer)
+	if (peer) {
 		dlist_insert_tail(&pkt_entry->entry,
 				  &peer->outstanding_tx_pkts);
+		pkt_entry->flags |= EFA_RDM_PKE_IN_PEER_OUTSTANDING_TX_PKTS;
+	}
 
 	assert(pkt_entry->alloc_type == EFA_RDM_PKE_FROM_EFA_TX_POOL);
 	ep->efa_outstanding_tx_ops++;
@@ -392,6 +371,14 @@ void efa_rdm_ep_record_tx_op_submitted(struct efa_rdm_ep *ep, struct efa_rdm_pke
 		peer->efa_outstanding_tx_ops++;
 
 	ope->efa_outstanding_tx_ops++;
+	switch (efa_rdm_pkt_type_of(pkt_entry)) {
+	case EFA_RDM_RECEIPT_PKT:
+	case EFA_RDM_EOR_PKT:
+		assert(ope->type == EFA_RDM_RXE);
+		dlist_insert_tail(&ope->ack_list_entry, &ope->ep->ope_posted_ack_list);
+	default:
+		break;
+	}
 #if ENABLE_DEBUG
 	ep->efa_total_posted_tx_ops++;
 #endif
@@ -444,16 +431,27 @@ void efa_rdm_ep_record_tx_op_completed(struct efa_rdm_ep *ep, struct efa_rdm_pke
 	 *    a new peer has the same GID+QPN was inserted to address, or because
 	 *    application removed the peer from address vector.
 	 */
-	if (pkt_entry->peer)
+	if (pkt_entry->peer) {
 		dlist_remove(&pkt_entry->entry);
+		pkt_entry->flags &= ~EFA_RDM_PKE_IN_PEER_OUTSTANDING_TX_PKTS;
+	}
 
 	assert(pkt_entry->alloc_type == EFA_RDM_PKE_FROM_EFA_TX_POOL);
 	ep->efa_outstanding_tx_ops--;
 	if (pkt_entry->peer)
 		pkt_entry->peer->efa_outstanding_tx_ops--;
 
-	if (ope)
+	if (ope) {
 		ope->efa_outstanding_tx_ops--;
+		switch(efa_rdm_pkt_type_of(pkt_entry)) {
+		case EFA_RDM_RECEIPT_PKT:
+		case EFA_RDM_EOR_PKT:
+			assert(ope->type == EFA_RDM_RXE);
+			dlist_remove(&ope->ack_list_entry);
+		default:
+			break;
+		}
+	}
 }
 
 /* @brief Queue a packet that encountered RNR error and setup RNR backoff
@@ -516,6 +514,7 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 
 	assert(ope);
 	dlist_insert_tail(&pkt_entry->entry, &ope->queued_pkts);
+	pkt_entry->flags |= EFA_RDM_PKE_IN_OPE_QUEUED_PKTS;
 	ep->efa_rnr_queued_pkt_cnt += 1;
 	assert(peer);
 	if (!(ope->internal_flags & EFA_RDM_OPE_QUEUED_RNR)) {
@@ -577,79 +576,36 @@ void efa_rdm_ep_queue_rnr_pkt(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_ent
 }
 
 /**
- * @brief trigger a peer to send a handshake packet
+ * @brief send a RTW packet or a handshake packet
  *
- * This patch send a EAGER_RTW packet of 0 byte to a peer, which would
- * cause the peer to send a handshake packet back to the endpoint.
+ * This function can either:
+ * 1. Send an EAGER_RTW packet of 0 bytes to trigger the peer to send a handshake back
+ * 2. Send a handshake packet
  *
- * This function is used for any extra feature that does not have an
- * alternative.
- *
- * We do not send eager rtm packets here because the receiver might require
- * ordering and an extra eager rtm will interrupt the reorder
- * process.
- *
- * @param[in]	ep	The endpoint on which the packet for triggering handshake will be sent.
- * @param[in]	addr	The address of the peer.
+ * @param[in]	ep		The endpoint on which the packet will be sent
+ * @param[in]	peer		The peer to communicate with
+ * @param[in]	trigger_mode	If true, send EAGER_RTW to trigger handshake; if false, send handshake packet.
  *
  * @returns
  * return 0 for success.
  * return negative libfabric error code for error. Possible errors include:
  * -FI_EAGAIN	temporarily out of resource to send packet
  */
-ssize_t efa_rdm_ep_trigger_handshake(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer)
+static ssize_t efa_rdm_ep_handshake_common(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer, bool trigger_mode)
 {
 	struct efa_rdm_ope *txe;
+	struct efa_rdm_pke *pkt_entry;
 	struct fi_msg msg = {0};
 	ssize_t err;
 
 	assert(peer);
-	if ((peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED) ||
-	    (peer->flags & EFA_RDM_PEER_REQ_SENT))
+
+	if (trigger_mode && ((peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED) ||
+			     (peer->flags & EFA_RDM_PEER_REQ_SENT)))
 		return 0;
 
 	msg.addr = peer->conn->fi_addr;
 
-	txe = efa_rdm_ep_alloc_txe(ep, peer, &msg, ofi_op_write, 0, 0);
-
-	if (OFI_UNLIKELY(!txe)) {
-		EFA_WARN(FI_LOG_EP_CTRL, "TX entries exhausted.\n");
-		return -FI_EAGAIN;
-	}
-
-	/* efa_rdm_ep_alloc_txe() joins ep->base_ep.util_ep.tx_op_flags and passed in flags,
-	 * reset to desired flags (remove things like FI_DELIVERY_COMPLETE, and FI_COMPLETION)
-	 */
-	txe->fi_flags = EFA_RDM_TXE_NO_COMPLETION | EFA_RDM_TXE_NO_COUNTER;
-	txe->msg_id = -1;
-	txe->internal_flags |= EFA_RDM_OPE_INTERNAL;
-
-	err = efa_rdm_ope_post_send(txe, EFA_RDM_EAGER_RTW_PKT);
-
-	if (OFI_UNLIKELY(err))
-		return err;
-
-	return 0;
-}
-
-/** @brief Post a handshake packet to a peer.
- *
- * @param ep The endpoint on which the handshake packet is sent out.
- * @param peer The peer to which the handshake packet is posted.
- * @return 0 on success, fi_errno on error.
- */
-ssize_t efa_rdm_ep_post_handshake(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer)
-{
-	struct efa_rdm_ope *txe;
-	struct fi_msg msg = {0};
-	struct efa_rdm_pke *pkt_entry;
-	fi_addr_t addr;
-	ssize_t ret;
-
-	addr = peer->conn->fi_addr;
-	msg.addr = addr;
-
-	/* ofi_op_write is ignored in handshake path */
 	txe = efa_rdm_ep_alloc_txe(ep, peer, &msg, ofi_op_write, 0, 0);
 
 	if (OFI_UNLIKELY(!txe)) {
@@ -673,14 +629,71 @@ ssize_t efa_rdm_ep_post_handshake(struct efa_rdm_ep *ep, struct efa_rdm_peer *pe
 	pkt_entry->ope = txe;
 	pkt_entry->peer = peer;
 
-	efa_rdm_pke_init_handshake(pkt_entry, peer);
-
-	ret = efa_rdm_pke_sendv(&pkt_entry, 1, 0);
-	if (OFI_UNLIKELY(ret)) {
-		efa_rdm_pke_release_tx(pkt_entry);
-		efa_rdm_txe_release(txe);
+	if (trigger_mode) {
+		txe->msg_id = -1;
+		err = efa_rdm_pke_init_eager_rtw(pkt_entry, txe);
+		efa_rdm_tracepoint(trigger_handshake_begin, 0, 0, txe->msg_id,
+				   (size_t) txe->cq_entry.op_context, txe->total_len);
+	} else {
+		err = efa_rdm_pke_init_handshake(pkt_entry, peer);
+		efa_rdm_tracepoint(post_handshake_begin, (size_t) pkt_entry,
+				   pkt_entry->pkt_size, txe->msg_id,
+				   (size_t) txe->cq_entry.op_context, txe->total_len);
 	}
-	return ret;
+
+	if (OFI_UNLIKELY(err))
+		goto handle_err;
+
+	err = efa_rdm_pke_sendv(&pkt_entry, 1, 0);
+	if (OFI_UNLIKELY(err))
+		goto handle_err;
+
+	if (trigger_mode)
+		peer->flags |= EFA_RDM_PEER_REQ_SENT;
+
+	return 0;
+
+handle_err:
+	efa_rdm_pke_release_tx(pkt_entry);
+	efa_rdm_txe_release(txe);
+	return err;
+}
+
+/**
+ * @brief trigger a peer to send a handshake packet
+ *
+ * This patch send a EAGER_RTW packet of 0 byte to a peer, which would
+ * cause the peer to send a handshake packet back to the endpoint.
+ *
+ * This function is used for any extra feature that does not have an
+ * alternative.
+ *
+ * We do not send eager rtm packets here because the receiver might require
+ * ordering and an extra eager rtm will interrupt the reorder
+ * process.
+ *
+ * @param[in]	ep	The endpoint on which the packet for triggering handshake will be sent.
+ * @param[in]	addr	The address of the peer.
+ *
+ * @returns
+ * return 0 for success.
+ * return negative libfabric error code for error. Possible errors include:
+ * -FI_EAGAIN	temporarily out of resource to send packet
+ */
+ssize_t efa_rdm_ep_trigger_handshake(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer)
+{
+	return efa_rdm_ep_handshake_common(ep, peer, true);
+}
+
+/** @brief Post a handshake packet to a peer.
+ *
+ * @param ep The endpoint on which the handshake packet is sent out.
+ * @param peer The peer to which the handshake packet is posted.
+ * @return 0 on success, fi_errno on error.
+ */
+ssize_t efa_rdm_ep_post_handshake(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer)
+{
+	return efa_rdm_ep_handshake_common(ep, peer, false);
 }
 
 /** @brief Post a handshake packet to a peer.
@@ -756,6 +769,7 @@ ssize_t efa_rdm_ep_post_queued_pkts(struct efa_rdm_ep *ep,
 		 * be removed from the list before send.
 		 */
 		dlist_remove(&pkt_entry->entry);
+		pkt_entry->flags &= ~EFA_RDM_PKE_IN_OPE_QUEUED_PKTS;
 
 		switch (efa_rdm_pkt_type_of(pkt_entry)) {
 		case EFA_RDM_RMA_CONTEXT_PKT:
@@ -771,6 +785,7 @@ ssize_t efa_rdm_ep_post_queued_pkts(struct efa_rdm_ep *ep,
 			if (ret == -FI_EAGAIN) {
 				/* add the pkt back to pkts, so it can be resent again */
 				dlist_insert_tail(&pkt_entry->entry, pkts);
+				pkt_entry->flags |= EFA_RDM_PKE_IN_OPE_QUEUED_PKTS;
 			}
 
 			return ret;

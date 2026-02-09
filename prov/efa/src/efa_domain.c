@@ -116,44 +116,26 @@ static int efa_domain_init_qp_table(struct efa_domain *efa_domain)
 
 static int efa_domain_init_rdm(struct efa_domain *efa_domain, struct fi_info *info)
 {
+	struct fi_info *shm_info = NULL;
 	int err;
-	bool enable_shm = efa_env.enable_shm_transfer;
 
 	assert(EFA_INFO_TYPE_IS_RDM(info));
 
-	/* App provided hints supercede environmental variables.
-	 *
-	 * Using the shm provider comes with some overheads, so avoid
-	 * initializing the provider if the app provides a hint that it does not
-	 * require node-local communication. We can still loopback over the EFA
-	 * device in cases where the app violates the hint and continues
-	 * communicating with node-local peers.
-	 *
-	 */
-	if ((info->caps & FI_REMOTE_COMM)
-	    /* but not local communication */
-	    && !(info->caps & FI_LOCAL_COMM)) {
-		enable_shm = false;
-	}
-
-	efa_domain->shm_info = NULL;
-	if (enable_shm)
-		efa_shm_info_create(info, &efa_domain->shm_info);
-	else
-		EFA_INFO(FI_LOG_CORE, "EFA will not use SHM for intranode communication because FI_EFA_ENABLE_SHM_TRANSFER=0\n");
-
-	if (efa_domain->shm_info) {
-		err = fi_fabric(efa_domain->shm_info->fabric_attr,
+	efa_shm_info_create(info, &shm_info);
+	if (shm_info && !efa_domain->fabric->shm_fabric) {
+		err = fi_fabric(shm_info->fabric_attr,
 				&efa_domain->fabric->shm_fabric,
 				efa_domain->fabric->util_fabric.fabric_fid.fid.context);
-		if (err)
+		if (err) {
+			EFA_WARN(FI_LOG_DOMAIN, 
+				 "Failed to create shm_fabric: %s\n",
+				 fi_strerror(-err));
 			return err;
-	} else {
-		efa_domain->fabric->shm_fabric = NULL;
+		}
 	}
 
 	if (efa_domain->fabric->shm_fabric) {
-		err = fi_domain(efa_domain->fabric->shm_fabric, efa_domain->shm_info,
+		err = fi_domain(efa_domain->fabric->shm_fabric, shm_info,
 				&efa_domain->shm_domain, NULL);
 		if (err)
 			return err;
@@ -169,6 +151,10 @@ static int efa_domain_init_rdm(struct efa_domain *efa_domain, struct fi_info *in
 	dlist_init(&efa_domain->ope_longcts_send_list);
 	dlist_init(&efa_domain->peer_backoff_list);
 	dlist_init(&efa_domain->handshake_queued_peer_list);
+
+	if (shm_info)
+		fi_freeinfo(shm_info);
+
 	return 0;
 }
 
@@ -195,6 +181,15 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 	if (!efa_domain)
 		return -FI_ENOMEM;
 
+	/* This list_entry is not the head of the list. But we initialize it
+	 * anyway to prevent a segfault in efa_domain_close.
+	 *
+	 * efa_domain_close always removes this dlist_entry. If the domain is
+	 * successfully opened, then this entry is added to g_efa_domain_list
+	 * and is successfully removed in efa_domain_close. But if the domain
+	 * open fails and we reach efa_domain_close in the error path, then not
+	 * initializing this list_entry will cause a segfault efa_domain_close.
+	 */
 	dlist_init(&efa_domain->list_entry);
 	efa_domain->fabric = container_of(fabric_fid, struct efa_fabric,
 					  util_fabric.fabric_fid);
@@ -206,8 +201,8 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 		goto err_free;
 	}
 
-	efa_domain->ibv_mr_reg_ct = 0;
-	efa_domain->ibv_mr_reg_sz = 0;
+	ofi_atomic_initialize64(&efa_domain->ibv_mr_reg_ct, 0);
+	ofi_atomic_initialize64(&efa_domain->ibv_mr_reg_sz, 0);
 
 	efa_domain->ah_map = NULL;
 
@@ -281,7 +276,7 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 		}
 		efa_domain->internal_buf_mr_regv = efa_mr_cache_regv;
 	} else {
-		efa_domain->internal_buf_mr_regv = fi_mr_regv;
+		efa_domain->internal_buf_mr_regv = efa_mr_internal_regv;
 	}
 	efa_domain->util_domain.domain_fid.mr = &efa_domain_mr_ops;
 
@@ -293,6 +288,8 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 		assert(EFA_INFO_TYPE_IS_DGRAM(info));
 		efa_domain->info_type = EFA_INFO_DGRAM;
 	}
+
+	dlist_init(&efa_domain->ah_lru_list);
 
 	efa_domain->util_domain.domain_fid.fid.ops = &efa_ops_domain_fid;
 	if (efa_domain->info_type == EFA_INFO_RDM) {
@@ -330,8 +327,8 @@ err_free:
 
 	err = efa_domain_close(&efa_domain->util_domain.domain_fid.fid);
 	if (err) {
-		EFA_WARN(FI_LOG_DOMAIN, "When handling error (%d), domain resource was being released."
-			 "During the release process, an addtional error (%d) was encoutered\n",
+		EFA_WARN(FI_LOG_DOMAIN, "When handling error (%d), domain resource was being released. "
+			 "During the release process, an additional error (%d) was encountered\n",
 			 -ret, -err);
 	}
 
@@ -389,9 +386,6 @@ static int efa_domain_close(fid_t fid)
 		if (ret)
 			return ret;
 	}
-
-	if (efa_domain->shm_info)
-		fi_freeinfo(efa_domain->shm_info);
 
 	if (efa_domain->info)
 		fi_freeinfo(efa_domain->info);
@@ -631,6 +625,8 @@ static int efa_domain_cq_open_ext(struct fid_domain *domain_fid,
 	struct efa_domain *efa_domain;
 	int err, retv;
 
+	/* GPU cannot do a blocking wait on CQ entries because 
+	 * system FDs are only accessible to CPU. */
 	if (attr->wait_obj != FI_WAIT_NONE)
 		return -FI_ENOSYS;
 
@@ -677,6 +673,8 @@ static int efa_domain_cq_open_ext(struct fid_domain *domain_fid,
 		EFA_WARN(FI_LOG_CQ, "Unable to create extended CQ with external memory: %s\n", fi_strerror(err));
 		goto err_free_util_cq;
 	}
+
+	ofi_atomic_initialize32(&cq->nevents, 0);
 
 	*cq_fid = &cq->util_cq.cq_fid;
 	(*cq_fid)->fid.fclass = FI_CLASS_CQ;

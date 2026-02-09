@@ -26,6 +26,7 @@ enum efa_rdm_ope_state {
 	EFA_RDM_RXE_UNEXP,	/**< rxe unexp msg waiting for post recv */
 	EFA_RDM_RXE_MATCHED,	/**< rxe matched with RTM */
 	EFA_RDM_RXE_RECV,	/**< rxe large msg recv data pkts */
+	EFA_RDM_OPE_ERR, /*< ope is in error state */
 };
 
 /**
@@ -120,6 +121,9 @@ struct efa_rdm_ope {
 
 	/* ep_entry is linked to tx/rxe_list in efa_rdm_ep */
 	struct dlist_entry ep_entry;
+
+	/* ack_list_entry is linked to ope_posted_ack_list in efa_rdm_ep */
+	struct dlist_entry ack_list_entry;
 
 	/* queued_entry is linked with ope_queued_list in efa_domain */
 	struct dlist_entry queued_entry;

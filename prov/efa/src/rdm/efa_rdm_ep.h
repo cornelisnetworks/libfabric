@@ -117,14 +117,14 @@ struct efa_rdm_ep {
 	/* list of pre-posted recv buffers */
 	struct dlist_entry rx_posted_buf_list;
 
-	/* Hashmap between fi_addr and efa_rdm_peer structs */
-	struct efa_rdm_ep_peer_map_entry *fi_addr_to_peer_map;
-
-	/* Hashmap between implicit peer id and efa_rdm_peer structs */
-	struct efa_rdm_ep_peer_map_entry *fi_addr_to_peer_map_implicit;
-
 	/* bufpool to hold the fi_addr->peer hashmap entries */
 	struct ofi_bufpool *peer_map_entry_pool;
+
+	/**< List of peers associated with this endpoint */
+	struct dlist_entry ep_peer_list;
+
+	/* buffer pool for peer reorder circular buffer */
+	struct ofi_bufpool *peer_robuf_pool;
 
 #if ENABLE_DEBUG
 	/* tx/rx_entries waiting to receive data in
@@ -197,6 +197,10 @@ struct efa_rdm_ep {
 	/* the count of opes queued before handshake is made with their peers */
 	size_t ope_queued_before_handshake_cnt;
 	bool homogeneous_peers; /* peers always support the same capabilities in extra_info as this ep */
+	struct fi_info *shm_info;	/* fi_info used to create shm_ep */
+
+	/* track operations with posted packets to ack a remote */
+	struct dlist_entry ope_posted_ack_list;
 };
 
 int efa_rdm_ep_flush_queued_blocking_copy_to_hmem(struct efa_rdm_ep *ep);
@@ -267,27 +271,6 @@ struct efa_domain *efa_rdm_ep_domain(struct efa_rdm_ep *ep)
 void efa_rdm_ep_post_internal_rx_pkts(struct efa_rdm_ep *ep);
 
 int efa_rdm_ep_bulk_post_internal_rx_pkts(struct efa_rdm_ep *ep);
-
-/**
- * @brief return whether this endpoint should write error cq entry for RNR.
- *
- * For an endpoint to write RNR completion, two conditions must be met:
- *
- * First, the end point must be able to receive RNR completion from rdma-core,
- * which means rnr_etry must be less then EFA_RNR_INFINITE_RETRY.
- *
- * Second, the app need to request this feature when opening endpoint
- * (by setting info->domain_attr->resource_mgmt to FI_RM_DISABLED).
- * The setting was saved as efa_rdm_ep->handle_resource_management.
- *
- * @param[in]	ep	endpoint
- */
-static inline
-bool efa_rdm_ep_should_write_rnr_completion(struct efa_rdm_ep *ep)
-{
-	return (ep->base_ep.rnr_retry < EFA_RNR_INFINITE_RETRY) &&
-		(ep->handle_resource_management == FI_RM_DISABLED);
-}
 
 /*
  * @brief: check whether we should use p2p for this transaction
@@ -551,27 +534,15 @@ bool efa_rdm_ep_support_unsolicited_write_recv(struct efa_rdm_ep *ep)
 	return ep->extra_info[0] & EFA_RDM_EXTRA_FEATURE_UNSOLICITED_WRITE_RECV;
 }
 
-struct efa_rdm_ep_peer_map_entry {
-	fi_addr_t addr;
-	struct efa_rdm_peer peer;
-	UT_hash_handle hndl;
-};
-
-int
-efa_rdm_ep_peer_map_insert(struct efa_rdm_ep_peer_map_entry **peer_map,
-			   fi_addr_t addr,
-			   struct efa_rdm_ep_peer_map_entry *map_entry);
-struct efa_rdm_peer *
-efa_rdm_ep_peer_map_lookup(struct efa_rdm_ep_peer_map_entry **peer_map,
-			   fi_addr_t addr);
-void efa_rdm_ep_peer_map_remove(struct efa_rdm_ep_peer_map_entry **peer_map,
-				fi_addr_t addr);
-
-void efa_rdm_ep_peer_map_implicit_to_explicit(struct efa_rdm_ep *ep,
-					      struct efa_rdm_peer *peer,
-					      fi_addr_t implicit_fi_addr,
-					      fi_addr_t explicit_fi_addr);
-
 bool efa_rdm_ep_has_unfinished_send(struct efa_rdm_ep *efa_rdm_ep);
+
+int efa_rdm_ep_close_shm_resources(struct efa_rdm_ep *efa_rdm_ep);
+
+void efa_rdm_ep_wait_send(struct efa_rdm_ep *efa_rdm_ep);
+
+/* Macro for getting local endpoint address string */
+#define EFA_RDM_GET_EP_ADDR_STR(ep, ep_addr_str) \
+	char ep_addr_str[OFI_ADDRSTRLEN] = {0}; \
+	efa_base_ep_raw_addr_str(&ep->base_ep, ep_addr_str, &(size_t){sizeof ep_addr_str});
 
 #endif

@@ -65,7 +65,12 @@ The following features are supported:
 *Completion events*
 : The provider supports *FI_CQ_FORMAT_CONTEXT*, *FI_CQ_FORMAT_MSG*, and
   *FI_CQ_FORMAT_DATA*. *FI_CQ_FORMAT_TAGGED* is supported on the `efa` fabric
-  of RDM endpoint. Wait objects are not currently supported.
+  of RDM endpoint.
+  
+  The `efa` and `efa-direct` fabrics for RDM endpoints support *FI_WAIT_UNSPEC*
+  and *FI_WAIT_FD* wait objects for blocking CQ operations (*fi_cq_sread*).
+  
+  DGRAM endpoints do not support wait objects.
 
 *Modes*
 : The provider requires the use of *FI_MSG_PREFIX* when running over
@@ -93,8 +98,11 @@ The following features are supported:
 # LIMITATIONS
 
 ## Completion events
-- Synchronous CQ read is not supported.
-- Wait objects are not currently supported.
+- DGRAM endpoints do not support synchronous CQ reads (*fi_cq_sread*) or wait objects.
+- *FI_WAIT_FD* is not supported for RDM endpoints with SHM transfers enabled.
+  Valid wait objects are *FI_WAIT_NONE* or *FI_WAIT_UNSPEC*. Blocking read via
+  *fi_cq_sread()* is supported and will wait on SHM completions. When SHM
+  transfers are disabled, *FI_WAIT_FD* wait objects are supported.
 
 ## RMA operations
 - Completion events for RMA targets (*FI_RMA_EVENT*) is not supported.
@@ -178,6 +186,13 @@ provider for AWS Neuron or Habana SynapseAI.
   insert the initiator side's address into AV before the RMA operation
   is kicked off, due to a current device limitation.
   The default value is false.
+
+*FI_OPT_EFA_USE_UNSOLICITED_WRITE_RECV - bool*
+: This option only applies to the fi_setopt() call.
+  It is used to disable unsolicited write recv for this endpoint, which can reduce
+  the likelihood of CQ overflow. The default value is true.
+  For efa-direct, FI_RX_CQ_DATA is required when FI_OPT_EFA_USE_UNSOLICITED_WRITE_RECV
+  is false, or it will return -FI_EOPNOTSUPP for the call to fi_setopt().
 
 # PROVIDER SPECIFIC DOMAIN OPS
 The efa provider exports extensions for operations
@@ -525,7 +540,7 @@ the refill will be skipped.
 *FI_EFA_USE_DATA_PATH_DIRECT*
 
 : Use the direct data path implementation that bypasses rdma-core on data path, including the CQ polling and TX/RX submissions, when it's available.
-Setting this variable as 1 will enable this feature (Default: false).
+Setting this variable as 0 will disable this feature (Default: true).
 
 # SEE ALSO
 

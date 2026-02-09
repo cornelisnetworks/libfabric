@@ -82,10 +82,10 @@ err_free_mem:
 
 /* Hardware only allows for 16 different command profiles per RGID. Since each
  * domain maps to a single RGID, this means effectively limits the number of
- * TX command queue per domain to be 16. Since one TX command queue is
- * reserved for triggered commands, real number is 15.
+ * TXQs per domain to be 16. Since one TXQ is reserved for triggered commands
+ * and the endpoint uses a TXQ, the actual number is 14.
  */
-#define MAX_DOM_TX_CMDQ 15U
+#define MAX_DOM_TX_CMDQ 14U
 
 static int cxip_domain_find_cmdq(struct cxip_domain *dom,
 				 uint16_t vni,
@@ -111,13 +111,7 @@ static int cxip_domain_find_cmdq(struct cxip_domain *dom,
 	dlist_foreach_container(&dom->cmdq_list, struct cxip_domain_cmdq, cmdq,
 				entry) {
 		if (cxip_cmdq_empty(cmdq->cmdq)) {
-
-			/* TODO: This needs to use new direct CP profile feature
-			 * which disables sharing of communication profile
-			 * across TX command queues.
-			 */
-			ret = cxip_cmdq_cp_set(cmdq->cmdq, vni, tc,
-					       CXI_TC_TYPE_DEFAULT);
+			ret = cxip_cmdq_cp_modify(cmdq->cmdq, vni, tc);
 			if (ret) {
 				CXIP_WARN("Failed to change communication profile: %d\n",
 					  ret);
@@ -134,7 +128,7 @@ static int cxip_domain_find_cmdq(struct cxip_domain *dom,
 	 * existing TX cmdq.
 	 */
 	if (dom->cmdq_cnt == MAX_DOM_TX_CMDQ) {
-		CXIP_WARN("At domain command queue max\n");
+		CXIP_DBG("At domain command queue max\n");
 		return -FI_EAGAIN;
 	}
 
@@ -433,7 +427,7 @@ void cxip_domain_prov_mr_id_free(struct cxip_domain *dom,
 static int cxip_domain_enable(struct cxip_domain *dom)
 {
 	int ret = FI_SUCCESS;
-	struct cxi_svc_desc svc_desc;
+	struct cxi_svc_desc svc_desc = {};
 
 	ofi_spin_lock(&dom->lock);
 
@@ -458,11 +452,6 @@ static int cxip_domain_enable(struct cxip_domain *dom)
 
 	if (!svc_desc.restricted_members)
 		CXIP_WARN("Security Issue: Using unrestricted service ID %d for %s. "
-			  "Please provide a service ID via auth_key fields.\n",
-			  dom->auth_key.svc_id,
-			  dom->iface->dev->info.device_name);
-	if (!svc_desc.restricted_vnis)
-		CXIP_WARN("Security Issue: Using service ID %d with unrestricted VNI access %s. "
 			  "Please provide a service ID via auth_key fields.\n",
 			  dom->auth_key.svc_id,
 			  dom->iface->dev->info.device_name);
@@ -553,12 +542,14 @@ unlock:
 static int cxip_dom_close(struct fid *fid)
 {
 	struct cxip_domain *dom;
-
+	int count;
 	dom = container_of(fid, struct cxip_domain,
 			   util_domain.domain_fid.fid);
-	if (ofi_atomic_get32(&dom->ref))
+	count = ofi_atomic_get32(&dom->ref);
+	if (count) {
+		CXIP_DBG("Domain refcount non-zero:%d returning FI_EBUSY\n", count);
 		return -FI_EBUSY;
-
+	}
 	if (dom->telemetry) {
 		cxip_telemetry_dump_delta(dom->telemetry);
 		cxip_telemetry_free(dom->telemetry);
@@ -1320,6 +1311,122 @@ static int cxip_domain_enable_prov_key_cache(struct fid *fid, bool enable)
 	return FI_SUCCESS;
 }
 
+static int cxip_domain_check_req_buf_size(struct cxip_domain *dom)
+{
+	size_t min_free = CXIP_REQ_BUF_HEADER_MAX_SIZE +
+			cxip_env.rdzv_threshold + cxip_env.rdzv_get_min;
+
+	if (dom->req_buf_size < min_free) {
+		dom->req_buf_size = min_free;
+		CXIP_WARN("Domain req_buf_size adjusted to min:%lu\n",
+			min_free);
+	} else {
+		CXIP_DBG("Domain req_buf_size ok:%lu\n", dom->req_buf_size);
+	}
+
+	return FI_SUCCESS;
+}
+
+static int cxip_domain_set_rx_match_mode(struct fid *fid, char *rx_match_mode)
+{
+	struct cxip_domain *dom;
+
+	if (fid->fclass != FI_CLASS_DOMAIN) {
+		CXIP_WARN("Invalid FID: %p\n", fid);
+		return -FI_EINVAL;
+	}
+
+	dom = container_of(fid, struct cxip_domain,
+			   util_domain.domain_fid.fid);
+
+	if (rx_match_mode) {
+		if (!strcasecmp(rx_match_mode, "hardware")) {
+			dom->rx_match_mode = CXIP_PTLTE_HARDWARE_MODE;
+			dom->msg_offload = true;
+		} else if (!strcmp(rx_match_mode, "software")) {
+			dom->rx_match_mode = CXIP_PTLTE_SOFTWARE_MODE;
+			dom->msg_offload = false;
+		} else if (!strcmp(rx_match_mode, "hybrid")) {
+			dom->rx_match_mode = CXIP_PTLTE_HYBRID_MODE;
+			dom->msg_offload = true;
+		} else {
+			CXIP_WARN("Unrecognized rx_match_mode: %s\n",
+				rx_match_mode);
+			/* app trying to set an illegal mode */
+			return -FI_EINVAL;
+		}
+	} else {
+		CXIP_WARN("%s NULL rx_match_mode!\n",
+			  __func__);
+		return -FI_EINVAL;
+	}
+	/* check and adjust if needed */
+	cxip_domain_check_req_buf_size(dom);
+	CXIP_DBG("rx_match_mode:%d %s msg_offload:%d\n", dom->rx_match_mode,
+		rx_match_mode, dom->msg_offload);
+
+	return FI_SUCCESS;
+}
+
+static int cxip_domain_get_rx_match_mode(struct fid *fid, char *rx_match_mode)
+{
+	struct cxip_domain *dom;
+
+	if (fid->fclass != FI_CLASS_DOMAIN) {
+		CXIP_WARN("Invalid FID: %p\n", fid);
+		return -FI_EINVAL;
+	}
+
+	dom = container_of(fid, struct cxip_domain,
+			   util_domain.domain_fid.fid);
+
+	if (rx_match_mode) {
+		if(dom->rx_match_mode == CXIP_PTLTE_HARDWARE_MODE) {
+			strcpy(rx_match_mode, "hardware");
+		} else if(dom->rx_match_mode == CXIP_PTLTE_SOFTWARE_MODE) {
+			strcpy(rx_match_mode, "software");
+		} else if(dom->rx_match_mode == CXIP_PTLTE_HYBRID_MODE) {
+			strcpy(rx_match_mode, "hybrid");
+		} else {
+			CXIP_WARN("Unrecognized rx_match_mode: %s\n",
+				rx_match_mode);
+			/* we should never hit this fatal case */
+			abort();	
+		}
+	} else {
+		CXIP_WARN("%s NULL rx_match_mode!\n",
+			  __func__);
+		return -FI_EINVAL;
+	}
+
+	CXIP_DBG("rx_match_mode:%d %s\n", dom->rx_match_mode,
+		rx_match_mode);
+	return FI_SUCCESS;
+}
+
+static int cxip_domain_set_req_buf_size(struct fid *fid, size_t req_buf_size)
+{
+	struct cxip_domain *dom;
+
+	if (fid->fclass != FI_CLASS_DOMAIN) {
+		CXIP_WARN("Invalid FID: %p\n", fid);
+		return -FI_EINVAL;
+	}
+
+	dom = container_of(fid, struct cxip_domain,
+			   util_domain.domain_fid.fid);
+	if (req_buf_size) {
+		dom->req_buf_size = req_buf_size;
+		/* check and adjust if needed */
+		cxip_domain_check_req_buf_size(dom);
+	} else {
+		CXIP_WARN("%s req_buf_size 0!\n",
+			  __func__);
+		return -FI_EINVAL;
+	}
+	CXIP_DBG("domain req_buf_size set to:%lu\n", dom->req_buf_size);
+	return FI_SUCCESS;
+}
 
 static int cxip_dom_control(struct fid *fid, int command, void *arg)
 {
@@ -1358,6 +1465,22 @@ static int cxip_dom_control(struct fid *fid, int command, void *arg)
 
 	case FI_OPT_CXI_GET_PROV_KEY_CACHE:
 		*(bool *)arg = dom->prov_key_cache;
+		break;
+
+	case FI_OPT_CXI_SET_RX_MATCH_MODE_OVERRIDE:
+		return cxip_domain_set_rx_match_mode(fid, (char *)arg);
+		break;
+
+	case FI_OPT_CXI_GET_RX_MATCH_MODE_OVERRIDE:
+		return cxip_domain_get_rx_match_mode(fid, (char *)arg);
+		break;
+
+	case FI_OPT_CXI_SET_REQ_BUF_SIZE_OVERRIDE:
+		return cxip_domain_set_req_buf_size(fid, *(size_t *)arg);
+		break;
+
+	case FI_OPT_CXI_GET_REQ_BUF_SIZE_OVERRIDE:
+		*(size_t *)arg = dom->req_buf_size;
 		break;
 
 	default:
@@ -1943,6 +2066,9 @@ int cxip_domain(struct fid_fabric *fabric, struct fi_info *info,
 	cxi_domain->mr_match_events = cxip_env.mr_match_events;
 	cxi_domain->optimized_mrs = cxip_env.optimized_mrs;
 	cxi_domain->prov_key_cache = cxip_env.prov_key_cache;
+	cxi_domain->rx_match_mode = cxip_env.rx_match_mode;
+	cxi_domain->msg_offload = cxip_env.msg_offload;
+	cxi_domain->req_buf_size = cxip_env.req_buf_size;
 	*dom = &cxi_domain->util_domain.domain_fid;
 
 	return 0;
@@ -1956,11 +2082,16 @@ free_dom:
 	return -FI_EINVAL;
 }
 
-int cxip_domain_valid_vni(struct cxip_domain *dom, unsigned int vni)
+int cxip_domain_valid_vni(struct cxip_domain *dom, struct cxi_auth_key *key)
 {
-	/* Currently the auth_key.svc_id field contains the resource group ID.
-	*/
-	return cxip_if_valid_rgroup_vni(dom->iface, dom->auth_key.svc_id, vni);
+	unsigned int t_svc_id;
+
+	if (key->svc_id)
+		t_svc_id = key->svc_id;
+	else
+		t_svc_id = dom->auth_key.svc_id;
+
+	return cxip_if_valid_rgroup_vni(dom->iface, t_svc_id, key->vni);
 }
 
 #define SUPPORTED_DWQ_FLAGS (FI_MORE | FI_COMPLETION | FI_DELIVERY_COMPLETE | \

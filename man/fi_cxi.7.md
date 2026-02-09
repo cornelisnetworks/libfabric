@@ -74,7 +74,8 @@ progress modes.
 
 ## Multi-threading
 
-The CXI provider supports FI_THREAD_SAFE and FI_THREAD_DOMAIN threading models.
+The CXI provider supports FI_THREAD_SAFE, FI_THREAD_COMPLETION, and
+FI_THREAD_DOMAIN threading models.
 
 ## Wait Objects
 
@@ -445,11 +446,10 @@ information.
 The CXI provider supports DMABUF for device memory registration.
 DMABUF is supported in ROCm 5.6+ and Cuda 11.7+ with nvidia open source driver
 525+.
-Both *FI_HMEM_ROCR_USE_DMABUF* and *FI_HMEM_CUDA_USE_DMABUF are disabled by
-default in libfabric core but the CXI provider enables
-*FI_HMEM_ROCR_USE_DMABUF* by default if not specifically set.
-There may be situations with CUDA that may double the BAR consumption.
-Until this is fixed in the CUDA stack, CUDA DMABUF will be disabled by default.
+Both *FI_HMEM_ROCR_USE_DMABUF* and *FI_HMEM_CUDA_USE_DMABUF* are disabled by
+default in libfabric core but the CXI provider enables both
+*FI_HMEM_ROCR_USE_DMABUF* and *FI_HMEM_CUDA_USE_DMABUF* by default if not
+specifically set.
 
 ## Translation Cache
 
@@ -1005,8 +1005,8 @@ The CXI provider checks for the following environment variables:
 *FI_CXI_RDZV_GET_MIN*
 :   Minimum rendezvous Get payload size. A Send with length less than or equal
     to *FI_CXI_RDZV_THRESHOLD* plus *FI_CXI_RDZV_GET_MIN* will be performed
-    using the eager protocol. Larger Sends will be performed using the
-    rendezvous protocol with *FI_CXI_RDZV_THRESHOLD* bytes of payload sent
+    using the eager protocol. Larger sends will be performed using the
+    rendezvous protocol with *FI_CXI_EAGER_SIZE* bytes of payload sent
     eagerly and the remainder of the payload read from the source using a Get.
     *FI_CXI_RDZV_THRESHOLD* plus *FI_CXI_RDZV_GET_MIN* must be less than or
     equal to *FI_CXI_OFLOW_BUF_SIZE*.
@@ -1029,6 +1029,12 @@ The CXI provider checks for the following environment variables:
     enabled with FI_CXI_RDZV_PROTO=alt_read. If set, it will disable the alt_read
     dedicated rendezvous get command queue, conserving command queue resources
     with a cost in performance.
+
+*FI_CXI_CNTR_TRIG_CMDQ*
+:   Enables dedicated triggered command queue for bound counters when using
+    FI_THREAD_SAFE or FI_THREAD_COMPLETION. This can improve the performance
+    multithreaded counter operations at the cost of command queue resources.
+    This option is disabled by default.
 
 *FI_CXI_DISABLE_NON_INJECT_MSG_IDC*
 :   Experimental option to disable favoring IDC for transmit of small messages
@@ -1377,6 +1383,30 @@ the remote MR cache for provider keys for the domain. By default the cache
 is enabled and can be used for provider keys that do not require events.
 The command will fail with -FI_EINVAL if FI_MR_PROV_KEY MR mode is not in use.
 It can only be changed prior to any MR being created.
+
+Command *FI_OPT_CXI_GET_RX_MATCH_MODE_OVERRIDE* where the argument is a pointer
+to a char buffer. The buffer must be large enough to hold one of the mode
+values "hardware", "software", or "hybrid" that are returned. The command will
+fail with -FI_EINVAL for a NULL buffer or unknown mode value.
+
+Command *FI_OPT_CXI_SET_RX_MATCH_MODE_OVERRIDE* where the argument is a pointer
+to a char buffer that is initialized to one of these mode values "hardware",
+"software", or "hybrid". This call overrides the default match mode setting at
+the domain level. By default the domain match mode is determined by the
+environment setting of FI_CXI_RX_MATCH_MODE. This option should be set prior to
+the creation of any endpoint for the domain. The command will fail with
+-FI_EINVAL for a NULL buffer or unknown mode value.
+
+Command *FI_OPT_CXI_GET_REQ_BUF_SIZE_OVERRIDE* where the argument is a pointer
+to size_t unsigned long. It will return the current domain level req_buf_size
+setting.
+
+Command *FI_OPT_CXI_SET_REQ_BUF_SIZE_OVERRIDE* where the argument is a pointer
+to size_t unsigned long. This call overrides the default req_buf_size setting at
+the domain level. By default the domain req_buf_size is determined by the
+environment setting of FI_CXI_REQ_BUF_SIZE. This option should be set prior to
+the creation of any endpoint for the domain. The command will fail with
+-FI_EINVAL for an illegal value of 0.
 
 ## CXI Domain Extensions
 

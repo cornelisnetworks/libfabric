@@ -54,7 +54,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ env.APT_PACKAGES }}
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 # v4.3.1
       - name: Download Coverity tools
         run: |
           wget https://scan.coverity.com/download/linux64 --post-data "token=${{ secrets.COVERITY_SCAN_TOKEN }}&project=ofiwg%2Flibfabric" -O coverity_tool.tgz
@@ -93,10 +93,10 @@ jobs:
             --form email=ofiwg@lists.openfabrics.org \
             --form file=@libfabric.tgz \
             --form version="main" \
-            --form description="`$PWD/install/bin/fi_info -l`" \
+            --form description="`$PWD/install/bin/fi_info --version`" \
             https://scan.coverity.com/builds?project=ofiwg%2Flibfabric
       - name: Upload build logs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverity-build-log.txt
           path: cov-int/build-log.txt

@@ -32,6 +32,7 @@
 #if HAVE_EFA_DATA_PATH_DIRECT
 
 #include "efa_io_defs.h"
+#include "efa_io_regs_defs.h"
 
 /**
  * The contents of this file only make sense if we can query rdma-core for QP
@@ -79,6 +80,7 @@ struct efa_data_path_direct_wq {
 	int phase;                    /**< Current phase bit for queue wrapping */
 	struct ofi_genlock *wqlock;   /**< Lock for thread-safe queue operations */
 	uint32_t *db;                 /**< Hardware doorbell register pointer */
+	uint32_t max_batch;           /**< max wqe cnt that can be posted in a batch */
 };
 
 /**
@@ -104,6 +106,10 @@ struct efa_data_path_direct_cq {
 	int phase;                                /**< Current phase bit for queue wrapping */
 	int qmask;                                /**< Mask for queue index wrapping */
 	uint16_t consumed_cnt;                    /**< Number of completions consumed */
+
+	uint32_t *db; /**< Doorbell */
+	uint16_t cc; /**< Consumer Counter */
+	uint8_t cmd_sn;
 };
 
 /**
@@ -138,9 +144,6 @@ struct efa_data_path_direct_sq {
 	 * built, but doorbell is deferred for batching efficiency.
 	 */
 	uint32_t num_wqe_pending;
-
-	/** Current work queue entry being constructed */
-	struct efa_io_tx_wqe curr_tx_wqe;
 };
 
 /**
@@ -154,8 +157,6 @@ struct efa_data_path_direct_sq {
 struct efa_data_path_direct_qp {
 	struct efa_data_path_direct_sq sq;        /**< Send queue structure */
 	struct efa_data_path_direct_rq rq;        /**< Receive queue structure */
-	int wr_session_err;                       /**< Error state for current WR session */
-
 };
 
 

@@ -5,14 +5,11 @@
 #define EFA_RDM_PEER_H
 
 #include "ofi_recvwin.h"
-#include "efa_av.h"
 #include "efa_rdm_ope.h"
 #include "efa_rdm_protocol.h"
 #include "efa_rdm_rxe_map.h"
 
-#define EFA_RDM_PEER_DEFAULT_REORDER_BUFFER_SIZE	(16384)
-
-OFI_DECL_RECVWIN_BUF(struct efa_rdm_pke*, efa_rdm_robuf, uint32_t);
+#define EFA_RDM_PEER_DEFAULT_REORDER_BUFFER_SIZE	(16)
 
 #define EFA_RDM_PEER_REQ_SENT BIT_ULL(0) /**< A REQ packet has been sent to the peer (peer should send a handshake back) */
 #define EFA_RDM_PEER_HANDSHAKE_SENT BIT_ULL(1) /**< a handshake packet has been sent to the peer */
@@ -25,6 +22,57 @@ OFI_DECL_RECVWIN_BUF(struct efa_rdm_pke*, efa_rdm_robuf, uint32_t);
  * Progress engine will retry sending handshake.
  */
 #define EFA_RDM_PEER_HANDSHAKE_QUEUED      BIT_ULL(5)
+#define EFA_RDM_PEER_UNRESP                BIT_ULL(6) /**< peer is unresponsive and we should not wait for completions */
+
+
+OFI_DECL_RECVWIN_BUF(struct efa_rdm_pke*, efa_rdm_robuf, uint32_t);
+
+/*
+ * recvwindow macro covers only the initilization and
+ * the alloc/free are required to be implemented by the provider
+ */
+
+/**
+ * @details
+ *
+ * @param[in] recvq			circular buffer object to be created
+ * @param[in] size			size of the queue
+ * @param[in] alloc_from_bufpool 	true means allocate from the buffer pool provided, false means do calloc
+ * @param[in] pool			buffer pool to be used for allocating the queue from when alloc_from_bufpool is true
+ * @return 0 on success or error otherwise
+ *
+ */
+static inline
+int efa_recvwin_buf_alloc(struct efa_rdm_robuf *recvq,
+                unsigned int size,  bool alloc_from_bufpool, struct ofi_bufpool *pool)
+{
+	assert(size == roundup_power_of_two(size));
+	recvq->exp_msg_id = 0;
+	recvq->win_size = size;
+	if (alloc_from_bufpool) {
+		assert(pool != NULL);
+		assert(size <= pool->entry_size);
+		recvq->pending = (struct recvwin_cirq*) ofi_buf_alloc(pool);
+	} else {
+		recvq->pending = (struct recvwin_cirq*) calloc(1, sizeof(struct recvwin_cirq) +
+					sizeof(struct efa_rdm_pke*) * size);
+	}
+	if (recvq->pending) {
+		recvwin_cirq_init(recvq->pending, size);
+		return 0;
+	} else {
+	       return -FI_ENOMEM;
+	}
+}
+
+static inline
+void efa_recvwin_free(struct efa_rdm_robuf *recvq, bool free_to_bufpool)
+{
+	if (free_to_bufpool)
+		ofi_buf_free(recvq->pending);
+	else
+		free(recvq->pending);
+}
 
 struct efa_rdm_peer_user_recv_qp
 {
@@ -64,7 +112,7 @@ struct efa_rdm_peer {
 	struct dlist_entry txe_list; /**< a list of txe related to this peer */
 	struct dlist_entry rxe_list; /**< a list of rxe related to this peer */
 	struct dlist_entry overflow_pke_list; /**< a list of out-of-order pke that overflow the current recvwin */
-
+	struct dlist_entry ep_peer_list_entry; /**< linked to efa_rdm_ep->ep_peer_list */
 	/**
 	 * @brief number of bytes that has been sent as part of runting protocols
 	 * @details this value is capped by efa_env.efa_runt_size
@@ -220,5 +268,10 @@ void efa_rdm_peer_proc_pending_items_in_robuf(struct efa_rdm_peer *peer, struct 
 size_t efa_rdm_peer_get_runt_size(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep, struct efa_rdm_ope *ope);
 
 int efa_rdm_peer_select_readbase_rtm(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep, struct efa_rdm_ope *ope);
+
+/* Macro for getting peer address string */
+#define EFA_RDM_GET_PEER_ADDR_STR(ep, peer, peer_addr_str) \
+	char peer_addr_str[OFI_ADDRSTRLEN] = {0}; \
+	efa_base_ep_get_peer_raw_addr_str(&ep->base_ep, peer->conn->fi_addr, peer_addr_str, &(size_t){sizeof peer_addr_str});
 
 #endif /* EFA_RDM_PEER_H */

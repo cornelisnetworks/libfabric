@@ -181,7 +181,7 @@
 #define CXIP_MINOR_VERSION		1
 #define CXIP_PROV_VERSION		FI_VERSION(CXIP_MAJOR_VERSION, \
 						   CXIP_MINOR_VERSION)
-#define CXIP_FI_VERSION			FI_VERSION(2, 2)
+#define CXIP_FI_VERSION			FI_VERSION(2, 4)
 #define CXIP_WIRE_PROTO_VERSION		1
 
 #define	CXIP_COLL_MAX_CONCUR		8
@@ -349,6 +349,7 @@ struct cxip_environment {
 	int ze_hmem_supported;
 	enum cxip_rdzv_proto  rdzv_proto;
 	int disable_alt_read_cmdq;
+	int cntr_trig_cmdq;
 	int enable_trig_op_limit;
 	int hybrid_posted_recv_preemptive;
 	int hybrid_unexpected_msg_preemptive;
@@ -361,9 +362,9 @@ struct cxip_environment {
 
 extern struct cxip_environment cxip_env;
 
-static inline bool cxip_software_pte_allowed(void)
+static inline bool cxip_software_pte_allowed(enum cxip_ep_ptle_mode rx_match_mode)
 {
-	return cxip_env.rx_match_mode != CXIP_PTLTE_HARDWARE_MODE;
+	return rx_match_mode != CXIP_PTLTE_HARDWARE_MODE;
 }
 
 /*
@@ -707,6 +708,7 @@ union cxip_match_bits {
 #define CXI_PLATFORM_Z1 2
 #define CXI_PLATFORM_FPGA 3
 
+#define MAX_HW_CPS 16
 /*
  * CXI Device wrapper
  *
@@ -751,7 +753,7 @@ struct cxip_lni {
 	struct cxil_lni *lni;
 
 	/* Hardware communication profiles */
-	struct cxi_cp *hw_cps[16];
+	struct cxi_cp *hw_cps[MAX_HW_CPS];
 	int n_cps;
 
 	/* Software remapped communication profiles. */
@@ -1012,6 +1014,12 @@ struct cxip_domain {
 	unsigned int cmdq_cnt;
 	struct ofi_genlock cmdq_lock;
 	size_t tx_size;
+
+	/* domain level match mode override */
+	enum cxip_ep_ptle_mode rx_match_mode;
+	bool msg_offload;
+	size_t req_buf_size;
+
 };
 
 int cxip_domain_emit_idc_put(struct cxip_domain *dom, uint16_t vni,
@@ -1048,7 +1056,8 @@ static inline bool cxip_domain_mr_cache_iface_enabled(struct cxip_domain *dom,
 	return cxip_domain_mr_cache_enabled(dom) && dom->iomm.monitors[iface];
 }
 
-int cxip_domain_valid_vni(struct cxip_domain *dom, unsigned int vni);
+int cxip_domain_valid_vni(struct cxip_domain *dom, struct cxi_auth_key *key);
+
 
 /* This structure implies knowledge about the breakdown of the NIC address,
  * which is taken from the AMA, that the provider does not know in a flexible
@@ -1482,6 +1491,9 @@ struct cxip_cntr {
 	/* Contexts to which counter is bound */
 	struct dlist_entry ctx_list;
 
+        /* Triggered cmdq for bound counters */
+	struct cxip_cmdq *trig_cmdq;
+
 	struct ofi_genlock lock;
 
 	struct cxi_ct *ct;
@@ -1663,20 +1675,14 @@ struct cxip_ep_coll_obj {
 	bool enabled;			// enabled
 	/* needed for progress after leaf sends its contribution */
 	struct dlist_entry leaf_rdma_get_list;
-	/* Logical address context for leaf rdma get */
-	uint64_t rdma_get_lac_va_tx;
-	/* Logical address context recieved by the leaf */
-	uint64_t rdma_get_lac_va_rx;
-	/* pointer to the source buffer base used in the RDMA */
-	uint8_t *root_rdma_get_data_p;
-	/* pointer to the dest buffer base used in the RDMA */
-	uint8_t *leaf_rdma_get_data_p;
-	/* root rdma get memory descriptor, for entire root src buffer */
-	struct cxip_md *root_rdma_get_md;
-	/* leaf rdma get memory descriptor, for entire leaf dest buffer */
-	struct cxip_md *leaf_rdma_get_md;
 	/* used to change ctrl_msg_type to CXIP_CTRL_MSG_ZB_DATA_RDMA_LAC */
 	bool leaf_save_root_lac;
+	/* Logical address context for leaf rdma get */
+	uint64_t rdma_get_lac_va_tx;
+	/* pointer to the source buffer base used in the RDMA */
+	uint8_t *root_rdma_get_data_p;
+	/* root rdma get memory descriptor, for entire root src buffer */
+	struct cxip_md *root_rdma_get_md;
 };
 
 /* Receive context state machine.
@@ -3080,6 +3086,18 @@ struct cxip_coll_mc {
 
 	struct cxi_md *reduction_md;		// memory descriptor for DMA
 	struct cxip_coll_reduction reduction[CXIP_COLL_MAX_CONCUR];
+	/* Logical address context for leaf rdma get */
+	uint64_t rdma_get_lac_va_tx;
+	/* Logical address context recieved by the leaf */
+	uint64_t rdma_get_lac_va_rx;
+	/* pointer to the source buffer base used in the RDMA */
+	uint8_t *root_rdma_get_data_p;
+	/* pointer to the dest buffer base used in the RDMA */
+	uint8_t *leaf_rdma_get_data_p;
+	/* root rdma get memory descriptor, for entire root src buffer */
+	struct cxip_md *root_rdma_get_md;
+	/* leaf rdma get memory descriptor, for entire leaf dest buffer */
+	struct cxip_md *leaf_rdma_get_md;
 };
 
 struct cxip_curl_handle;
@@ -3200,6 +3218,8 @@ enum cxi_traffic_class cxip_ofi_to_cxi_tc(uint32_t ofi_tclass);
 int cxip_cmdq_cp_set(struct cxip_cmdq *cmdq, uint16_t vni,
 		     enum cxi_traffic_class tc,
 		     enum cxi_traffic_class_type tc_type);
+int cxip_cmdq_cp_modify(struct cxip_cmdq *cmdq, uint16_t vni,
+			enum cxi_traffic_class tc);
 void cxip_if_init(void);
 void cxip_if_fini(void);
 
@@ -3631,11 +3651,19 @@ extern bool cxip_coll_trace_linebuf;		// set line buffering for trace
 extern int cxip_coll_trace_rank;		// tracing rank
 extern int cxip_coll_trace_numranks;		// tracing number of ranks
 extern FILE *cxip_coll_trace_fid;		// trace output file descriptor
+extern bool cxip_coll_prod_trace_initialized;	// turn on tracing in non-debug
+						// build
+extern char **cxip_coll_prod_trace_buffer;	// production trace buffer
+extern int cxip_coll_prod_trace_current;	// current index in trace buffer
+extern int cxip_coll_prod_trace_max_idx;	// max lines in trace buffer
+extern int cxip_coll_prod_trace_ln_max;		// max trace line length
 
 int cxip_coll_trace_attr cxip_coll_trace(const char *fmt, ...);
+int cxip_coll_trace_attr cxip_coll_prod_trace(const char *fmt, ...);
 void cxip_coll_trace_flush(void);
 void cxip_coll_trace_close(void);
-void cxip_coll_trace_init(void);
+void cxip_coll_trace_init(struct cxip_ep_obj *ep_obj);
+void cxip_coll_print_prod_trace(void);
 
 /* debugging TRACE filtering control */
 enum cxip_coll_trace_module {
@@ -3665,12 +3693,19 @@ static inline bool cxip_coll_trace_true(int mod)
 	return (!cxip_coll_trace_muted) && (cxip_coll_trace_mask & (1L << mod));
 }
 
+static inline bool cxip_coll_prod_trace_true(void)
+{
+	return cxip_coll_prod_trace_initialized;
+}
+
 #if ENABLE_DEBUG
 #define CXIP_COLL_TRACE(mod, fmt, ...) \
 	do {if (cxip_coll_trace_true(mod)) \
 	    cxip_coll_trace(fmt, ##__VA_ARGS__);} while (0)
 #else
-#define	CXIP_COLL_TRACE(mod, fmt, ...) do {} while (0)
+#define	CXIP_COLL_TRACE(mod, fmt, ...) \
+	do {if (cxip_coll_prod_trace_true()) \
+	    cxip_coll_prod_trace(fmt, ##__VA_ARGS__); } while (0)
 #endif
 
 /* fabric logging implementation functions */

@@ -1006,7 +1006,7 @@ fi_addr_t ofi_ip_av_get_fi_addr(struct util_av *av, const void *addr);
 int ofi_get_addr(uint32_t *addr_format, uint64_t flags,
 		 const char *node, const char *service,
 		 void **addr, size_t *addrlen);
-int ofi_get_src_addr(uint32_t addr_format,
+int ofi_get_src_addr(uint32_t *addr_format,
 		     const void *dest_addr, size_t dest_addrlen,
 		     void **src_addr, size_t *src_addrlen);
 void ofi_getnodename(uint16_t sa_family, char *buf, int buflen);
@@ -1156,7 +1156,9 @@ int util_getinfo(const struct util_prov *util_prov, uint32_t version,
 int ofi_ip_getinfo(const struct util_prov *prov, uint32_t version,
 		   const char *node, const char *service, uint64_t flags,
 		   const struct fi_info *hints, struct fi_info **info);
-
+void util_lookup_existing_fabric_domain(const struct util_prov *util_prov,
+					const struct fi_info *hints,
+					struct fi_info **info);
 
 struct fid_list_entry {
 	struct dlist_entry	entry;
@@ -1285,6 +1287,20 @@ struct ofi_ops_flow_ctrl {
 			ssize_t (*send_handler)(struct fid_ep *ep, uint64_t credits));
 };
 
+enum util_rx_entry_status {
+	/* rx entries with status RX_ENTRY_POSTED are associated with
+	   application posted fi_recv calls that have not yet been matched to
+	   packets from peer endpoints */
+	RX_ENTRY_POSTED = 0,
+	/* rx entries with status RX_ENTRY_UNEXP are associated with
+	   packets from peer endpoints that have not yet been matched to
+	   application posted fi_recv */
+	RX_ENTRY_UNEXP,
+	/* rx entries with status RX_ENTRY_MATCHED are associated with matched
+	   pairs of packets and application posted receives */
+	RX_ENTRY_MATCHED
+};
+
 struct util_rx_entry {
 	union {
 		struct dlist_entry	d_entry;
@@ -1294,6 +1310,7 @@ struct util_rx_entry {
 	uint64_t		seq_no;
 	uint64_t		ignore;
 	int			multi_recv_ref;
+	enum util_rx_entry_status	status;
 	/* extra memory allocated at the end of each entry to hold iovecs and
 	 * MR descriptors. The amount of memory is determined by the provider's
 	 * iov limit.
