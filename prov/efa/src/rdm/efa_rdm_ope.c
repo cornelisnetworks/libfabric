@@ -147,8 +147,10 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 		efa_rdm_pke_release_tx(pkt_entry);
 	}
 
-	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS)
+	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
 		dlist_remove(&txe->queued_entry);
+		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
 
 #ifdef ENABLE_EFA_POISONING
 	efa_rdm_poison_mem_region(txe,
@@ -201,8 +203,10 @@ void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe)
 				     pkt_entry, entry, tmp)
 		efa_rdm_pke_release_tx(pkt_entry);
 
-	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS)
+	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
 		dlist_remove(&rxe->queued_entry);
+		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
 
 #ifdef ENABLE_EFA_POISONING
 	efa_rdm_poison_mem_region(rxe,
@@ -597,24 +601,34 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	case EFA_RDM_RXE_UNEXP:
 	case EFA_RDM_RXE_MATCHED:
 		break;
+	case EFA_RDM_OPE_SEND:
+		dlist_remove(&rxe->entry);
+		break;
 	case EFA_RDM_RXE_RECV:
 #if ENABLE_DEBUG
 		dlist_remove(&rxe->pending_recv_entry);
 #endif
 		break;
+	case EFA_RDM_OPE_ERR:
+		/* Already progressed, no-op */
+		return;
 	default:
 		EFA_WARN(FI_LOG_CQ, "rxe unknown state %d\n",
 			rxe->state);
 		assert(0 && "rxe unknown state");
 	}
 
+	rxe->state = EFA_RDM_OPE_ERR;
+
 	dlist_foreach_container_safe(&rxe->queued_pkts,
 				     struct efa_rdm_pke,
 				     pkt_entry, entry, tmp)
 		efa_rdm_pke_release_tx(pkt_entry);
 
-	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS)
+	if (rxe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
 		dlist_remove(&rxe->queued_entry);
+		rxe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
 
 	if (rxe->unexp_pkt) {
 		efa_rdm_pke_release_rx_list(rxe->unexp_pkt);
@@ -634,13 +648,12 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 		err_entry.err_data = err_msg;
 	}
 
-	EFA_WARN(FI_LOG_CQ, "err: %d, message: %s (%d)\n",
+	EFA_INFO(FI_LOG_CQ, "err: %d, message: %s (%d)\n",
 		err_entry.err,
 		err_entry.err_data
 			? (const char *) err_entry.err_data
 			: efa_strerror(err_entry.prov_errno),
 		 err_entry.prov_errno);
-	efa_show_help(err_entry.prov_errno);
 	/*
 	 * TODO: We can't free the rxe as we may receive additional
 	 * packets for this entry. Add ref counting so the rxe can safely
@@ -649,6 +662,14 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	//efa_rdm_rxe_release(rxe);
 
 	if (rxe->internal_flags & EFA_RDM_OPE_INTERNAL) {
+		EFA_WARN(FI_LOG_CQ, "EFA provider internal rxe failure err: %d, message: %s (%d)\n",
+			err_entry.err,
+			err_entry.err_data
+				? (const char *) err_entry.err_data
+				: efa_strerror(err_entry.prov_errno),
+		 	err_entry.prov_errno);
+		efa_show_help(err_entry.prov_errno);
+
 		EFA_WARN(FI_LOG_CQ,
 			"Writing eq error for rxe from internal operations\n");
 		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
@@ -658,6 +679,14 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	efa_cntr_report_error(&ep->base_ep.util_ep, err_entry.flags);
 	write_cq_err = ofi_cq_write_error(util_cq, &err_entry);
 	if (write_cq_err) {
+		EFA_WARN(FI_LOG_CQ, "Failed to write CQ error entry for rxe err: %d, message: %s (%d)\n",
+			err_entry.err,
+			err_entry.err_data
+				? (const char *) err_entry.err_data
+				: efa_strerror(err_entry.prov_errno),
+		 	err_entry.prov_errno);
+		efa_show_help(err_entry.prov_errno);
+
 		EFA_WARN(FI_LOG_CQ,
 			"Error writing error cq entry when handling RX error\n");
 		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
@@ -710,14 +739,21 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	case EFA_RDM_OPE_SEND:
 		dlist_remove(&txe->entry);
 		break;
+	case EFA_RDM_OPE_ERR:
+		/* Already progressed, no-op */
+		return;
 	default:
 		EFA_WARN(FI_LOG_CQ, "txe unknown state %d\n",
 			txe->state);
 		assert(0 && "txe unknown state");
 	}
 
-	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS)
+	txe->state = EFA_RDM_OPE_ERR;
+
+	if (txe->internal_flags & EFA_RDM_OPE_QUEUED_FLAGS) {
 		dlist_remove(&txe->queued_entry);
+		txe->internal_flags &= ~EFA_RDM_OPE_QUEUED_FLAGS;
+	}
 
 	dlist_foreach_container_safe(&txe->queued_pkts,
 				     struct efa_rdm_pke,
@@ -736,14 +772,12 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 		err_entry.err_data = err_msg;
 	}
 
-	EFA_WARN(FI_LOG_CQ, "err: %d, message: %s (%d)\n",
+	EFA_INFO(FI_LOG_CQ, "err: %d, message: %s (%d)\n",
 		err_entry.err,
 		err_entry.err_data
 			? (const char *) err_entry.err_data
 			: efa_strerror(err_entry.prov_errno),
 		err_entry.prov_errno);
-
-	efa_show_help(err_entry.prov_errno);
 
 	/*
 	 * TODO: We can't free the txe as we may receive a control packet
@@ -753,6 +787,15 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	//efa_rdm_txe_release(txe);
 
 	if (txe->internal_flags & EFA_RDM_OPE_INTERNAL) {
+		EFA_WARN(FI_LOG_CQ, "EFA provider internal txe failure err: %d, message: %s (%d)\n",
+			err_entry.err,
+			err_entry.err_data
+				? (const char *) err_entry.err_data
+				: efa_strerror(err_entry.prov_errno),
+			err_entry.prov_errno);
+
+		efa_show_help(err_entry.prov_errno);
+
 		EFA_WARN(FI_LOG_CQ,
 			"Writing eq error for txe from internal operations\n");
 		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
@@ -762,6 +805,15 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	efa_cntr_report_error(&ep->base_ep.util_ep, txe->cq_entry.flags);
 	write_cq_err = ofi_cq_write_error(util_cq, &err_entry);
 	if (write_cq_err) {
+		EFA_WARN(FI_LOG_CQ, "Failed to write CQ error entry for txe err: %d, message: %s (%d)\n",
+			err_entry.err,
+			err_entry.err_data
+				? (const char *) err_entry.err_data
+				: efa_strerror(err_entry.prov_errno),
+			err_entry.prov_errno);
+
+		efa_show_help(err_entry.prov_errno);
+
 		EFA_WARN(FI_LOG_CQ,
 			"Error writing error cq entry when handling TX error\n");
 		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
@@ -1732,7 +1784,7 @@ ssize_t efa_rdm_ope_post_send(struct efa_rdm_ope *ope, int pkt_type)
 	struct efa_rdm_ep *ep;
 	struct efa_rdm_pke *pkt_entry_vec[EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND];
 	ssize_t err;
-	size_t segment_offset;
+	int64_t segment_offset;
 	int pkt_entry_cnt, pkt_entry_cnt_allocated = 0, pkt_entry_data_size_vec[EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND];
 	int i;
 	uint64_t flags = 0;
@@ -1744,7 +1796,7 @@ ssize_t efa_rdm_ope_post_send(struct efa_rdm_ope *ope, int pkt_type)
 
 	ep = ope->ep;
 	assert(ep);
-	segment_offset = efa_rdm_pkt_type_contains_data(pkt_type) ? ope->bytes_sent : -1;
+	segment_offset = efa_rdm_pkt_type_contains_data(pkt_type) ? (int64_t) ope->bytes_sent : -1;
 	for (i = 0; i < pkt_entry_cnt; ++i) {
 		pkt_entry_vec[i] = efa_rdm_pke_alloc(ep, ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);
 

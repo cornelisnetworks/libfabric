@@ -62,6 +62,12 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 			efa_happy=0
 			AC_MSG_WARN([The EFA provider is not supported on 32-bit systems.])
 		])
+
+		dnl Check CPU architecture for EFA support
+		AS_IF([test x$host_cpu != xx86_64 && test x$host_cpu != xaarch64], [
+			efa_happy=0
+			AC_MSG_WARN([The EFA provider is only supported on x86_64 and aarch64 systems])
+		])
 	])
 
 	save_CPPFLAGS=$CPPFLAGS
@@ -75,12 +81,14 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 	have_caps_cq_with_ext_mem_dmabuf=0
 	have_ibv_is_fork_initialized=0
 	efa_support_data_in_order_aligned_128_byte=0
+	have_ibv_query_qp_data_in_order_device_only=0
 	efadv_support_extended_cq=0
 	have_efa_dmabuf_mr=0
 	have_efadv_query_mr=0
 	have_efadv_sl=0
 	have_efadv_query_qp_wqs=0
 	have_efadv_query_cq=0
+	have_efadv_cq_attr_db=0
 	have_ibv_create_comp_channel=0
 	have_ibv_get_cq_event=0
 
@@ -121,6 +129,11 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 		AC_CHECK_DECL([IBV_QUERY_QP_DATA_IN_ORDER_ALIGNED_128_BYTES],
 			[efa_support_data_in_order_aligned_128_byte=1],
 			[efa_support_data_in_order_aligned_128_byte=0],
+			[[#include <infiniband/verbs.h>]])
+
+		AC_CHECK_DECL([IBV_QUERY_QP_DATA_IN_ORDER_DEVICE_ONLY],
+			[have_ibv_query_qp_data_in_order_device_only=1],
+			[have_ibv_query_qp_data_in_order_device_only=0],
 			[[#include <infiniband/verbs.h>]])
 
 		AC_CHECK_DECL([ibv_reg_dmabuf_mr],
@@ -175,17 +188,22 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 			[have_efadv_sl=1],
 			[have_efadv_sl=0],
 			[[#include <infiniband/efadv.h>]])
-		
+
 		have_efadv_query_qp_wqs=1
 		AC_CHECK_DECL([efadv_query_qp_wqs],
 			[],
 			[have_efadv_query_qp_wqs=0],
 			[[#include <infiniband/efadv.h>]])
-	
+
 		have_efadv_query_cq=1
 		AC_CHECK_DECL([efadv_query_cq],
 			[],
 			[have_efadv_query_cq=0],
+			[[#include <infiniband/efadv.h>]])
+
+		AC_CHECK_MEMBER([struct efadv_cq_attr.doorbell],
+			[have_efadv_cq_attr_db=1],
+			[have_efadv_cq_attr_db=0],
 			[[#include <infiniband/efadv.h>]])
 
 		dnl Check for CQ notification functions
@@ -224,6 +242,9 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 	AC_DEFINE_UNQUOTED([HAVE_EFA_DATA_IN_ORDER_ALIGNED_128_BYTES],
 		[$efa_support_data_in_order_aligned_128_byte],
 		[Indicates if EFA supports 128 bytes in-order in writing.])
+	AC_DEFINE_UNQUOTED([HAVE_IBV_QUERY_QP_DATA_IN_ORDER_DEVICE_ONLY],
+		[$have_ibv_query_qp_data_in_order_device_only],
+		[Indicates if IBV_QUERY_QP_DATA_IN_ORDER_DEVICE_ONLY flag is available.])
 	AC_DEFINE_UNQUOTED([HAVE_EFA_DMABUF_MR],
 		[$have_efa_dmabuf_mr],
 		[Indicates if ibv_reg_dmabuf_mr verbs is available])
@@ -239,6 +260,9 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 	AC_DEFINE_UNQUOTED([HAVE_EFADV_QUERY_CQ],
 		[$have_efadv_query_cq],
 		[Indicates if efadv_query_cq is available])
+	AC_DEFINE_UNQUOTED([HAVE_EFADV_CQ_ATTR_DB],
+		[$have_efadv_cq_attr_db],
+		[Indicates if efadv_cq_attr struct has doorbell field])
 	AS_IF([test "$have_efadv_query_qp_wqs" = "1" -a "$have_efadv_query_cq" = "1"],
 		[have_efa_data_path_direct=1],
 		[have_efa_data_path_direct=0])
@@ -257,6 +281,13 @@ AC_DEFUN([FI_EFA_CONFIGURE],[
 	efa_CPPFLAGS="$efa_ibverbs_CPPFLAGS $efadv_CPPFLAGS"
 	efa_LDFLAGS="$efa_ibverbs_LDFLAGS $efadv_LDFLAGS"
 	efa_LIBS="$efa_ibverbs_LIBS $efadv_LIBS"
+
+	dnl Add RPATH for custom efa_LIBDIR if specified
+	AS_IF([test x"$efa_LIBDIR" != x""],
+	[
+		AC_MSG_NOTICE([Adding RUNPATH for EFA libraries: $efa_LIBDIR])
+		efa_LDFLAGS+=" -L$efa_LIBDIR -Wl,--enable-new-dtags,-rpath,$efa_LIBDIR"
+	])
 	cmocka_rpath=""
 	AC_ARG_ENABLE([efa-unit-test],
 		[

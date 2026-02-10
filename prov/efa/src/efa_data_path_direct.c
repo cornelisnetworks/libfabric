@@ -88,6 +88,7 @@ int efa_data_path_direct_qp_initialize(struct efa_qp *efa_qp)
 	direct_qp->rq.buf = rq_attr.buffer;           /* Hardware RQ buffer */
 	direct_qp->rq.wq.db = rq_attr.doorbell;       /* Hardware doorbell */
 	direct_qp->rq.wq.wqe_size = rq_attr.entry_size; /* Entry size */
+	direct_qp->rq.wq.max_batch = rq_attr.max_batch;
 	/* Initialize receive work queue management structures */
 	efa_data_path_direct_wq_initialize(&direct_qp->rq.wq, rq_attr.num_entries,
 			   &base_ep->util_ep.lock);
@@ -99,6 +100,7 @@ int efa_data_path_direct_qp_initialize(struct efa_qp *efa_qp)
 	direct_qp->sq.num_wqe_pending = 0;            /* No pending WQEs initially */
 
 	direct_qp->sq.wq.wqe_size = sq_attr.entry_size; /* Entry size */
+	direct_qp->sq.wq.max_batch = sq_attr.max_batch;
 	/* Initialize send work queue management structures */
 	efa_data_path_direct_wq_initialize(&direct_qp->sq.wq, sq_attr.num_entries,
 			   &base_ep->util_ep.lock);
@@ -158,10 +160,10 @@ void efa_data_path_direct_qp_finalize(struct efa_qp *efa_qp)
  * @note This function requires that the underlying IBV completion queue
  *       has been successfully created before being called
  */
-int efa_data_path_direct_cq_initialize(struct efa_cq *efa_cq)
+int efa_data_path_direct_cq_initialize(struct efa_ibv_cq *ibv_cq)
 {
 	struct efadv_cq_attr attr = {0};  /* Hardware CQ attributes */
-	struct efa_data_path_direct_cq *data_path_direct = &efa_cq->ibv_cq.data_path_direct;
+	struct efa_data_path_direct_cq *data_path_direct = &ibv_cq->data_path_direct;
 	int ret;
 
 	/* Initialize the direct completion queue structure */
@@ -181,19 +183,24 @@ int efa_data_path_direct_cq_initialize(struct efa_cq *efa_cq)
 	}
 
 	/* Query hardware completion queue attributes from rdma-core */
-	ret = efadv_query_cq(ibv_cq_ex_to_cq(efa_cq->ibv_cq.ibv_cq_ex), &attr,
+	ret = efadv_query_cq(ibv_cq_ex_to_cq(ibv_cq->ibv_cq_ex), &attr,
 		     sizeof(attr));
 	if (ret != FI_SUCCESS) {
 		return ret;
 	}
 
 	/* Mark direct CQ operations as enabled */
-	efa_cq->ibv_cq.data_path_direct_enabled = true;
+	ibv_cq->data_path_direct_enabled = true;
 
 	/* Configure completion queue with hardware attributes */
 	data_path_direct->buffer = attr.buffer;           /* Hardware CQ buffer */
 	data_path_direct->entry_size = attr.entry_size;   /* Size of each CQ entry */
 	data_path_direct->num_entries = attr.num_entries; /* Total number of entries */
+#if HAVE_EFADV_CQ_ATTR_DB
+	data_path_direct->db = attr.doorbell;
+#else
+	data_path_direct->db = NULL;
+#endif
 
 	/* Initialize completion processing state */
 	data_path_direct->phase = 1;                      /* Start with phase 1 */

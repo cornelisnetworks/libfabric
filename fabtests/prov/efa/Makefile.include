@@ -35,7 +35,10 @@ bin_PROGRAMS += prov/efa/src/fi_efa_rnr_read_cq_error \
 		prov/efa/src/fi_efa_rnr_queue_resend \
 		prov/efa/src/fi_efa_info_test \
 		prov/efa/src/fi_efa_rdm_remote_exit_early \
-		prov/efa/src/fi_efa_multi_ep_mt
+		prov/efa/src/fi_efa_multi_ep_mt \
+		prov/efa/src/fi_efa_implicit_av_test \
+		prov/efa/src/fi_efa_multi_ep_stress \
+		prov/efa/src/fi_efa_mmap_test
 
 if HAVE_VERBS_DEVEL
 if HAVE_EFA_DV
@@ -78,6 +81,21 @@ prov_efa_src_fi_efa_multi_ep_mt_SOURCES = \
 	$(efa_rnr_srcs)
 prov_efa_src_fi_efa_multi_ep_mt_LDADD = libfabtests.la
 
+prov_efa_src_fi_efa_multi_ep_stress_SOURCES = \
+	prov/efa/src/multi_ep_stress.c \
+	$(efa_rnr_srcs)
+prov_efa_src_fi_efa_multi_ep_stress_LDADD = libfabtests.la
+
+prov_efa_src_fi_efa_implicit_av_test_SOURCES = \
+	prov/efa/src/efa_shared.h \
+	prov/efa/src/efa_implicit_av_test.c
+prov_efa_src_fi_efa_implicit_av_test_LDADD = libfabtests.la
+
+prov_efa_src_fi_efa_mmap_test_SOURCES = \
+	prov/efa/src/efa_shared.h \
+	prov/efa/src/efa_mmap_test.c
+prov_efa_src_fi_efa_mmap_test_LDADD = libfabtests.la
+
 if HAVE_VERBS_DEVEL
 if HAVE_EFA_DV
 efa_exhaust_mr_reg_srcs = \
@@ -100,7 +118,7 @@ prov_efa_src_fi_efa_rdma_checker_LDFLAGS = -lefa
 endif BUILD_EFA_RDMA_CHECKER
 
 if EFAGDA
-SUBDIRS = prov/efa/src/efagda
+SUBDIRS += prov/efa/src/efagda
 prov_efa_src_fi_efa_gda_SOURCES = prov/efa/src/efa_gda.c
 prov_efa_src_fi_efa_gda_LDFLAGS = -Wl,-rpath=$(libdir)
 prov_efa_src_fi_efa_gda_LDADD = -L$(libdir) -L/usr/local/cuda/lib64 -lefagda -lcudart -lcuda libfabtests.la
@@ -108,6 +126,8 @@ export prefix
 install-efagda:
 	$(MAKE) -C prov/efa/src/efagda install prefix=$(prefix)
 endif EFAGDA
+
+EXTRA_DIST += prov/efa/src/efagda
 
 endif HAVE_VERBS_DEVEL
 endif ENABLE_EFA

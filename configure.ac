@@ -10,7 +10,7 @@ dnl
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.60])
-AC_INIT([libfabric], [2.3.0a1], [ofiwg@lists.openfabrics.org])
+AC_INIT([libfabric], [2.5.0a1], [ofiwg@lists.openfabrics.org])
 AC_CONFIG_SRCDIR([src/fabric.c])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR(config)
@@ -175,7 +175,18 @@ AC_DEFUN([FI_ARG_ENABLE_SANITIZER],[
                       [],
                       [enable_$1=no])
         AS_IF([test x"$enable_$1" != x"no"],
-              [CFLAGS="-fsanitize=$2 $CFLAGS"])
+              [save_CFLAGS="$CFLAGS"
+               save_LDFLAGS="$LDFLAGS"
+               CFLAGS="-fsanitize=$2 $CFLAGS"
+               LDFLAGS="-fsanitize=$2 $LDFLAGS"
+               AC_MSG_CHECKING([for $3Sanitizer support])
+               AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[return 0;]])],
+                              [AC_MSG_RESULT([yes])],
+                              [AC_MSG_RESULT([no])
+                               CFLAGS="$save_CFLAGS"
+                               LDFLAGS="$save_LDFLAGS"
+                               AC_MSG_ERROR([$3Sanitizer requested but compiler/linker support not found.])])
+              ])
 ])
 
 m4_map([FI_ARG_ENABLE_SANITIZER],[
@@ -607,7 +618,7 @@ dnl restricted DL open
 restricted_dl=0
 AC_ARG_ENABLE([restricted_dl],
               [AC_HELP_STRING([--enable-restricted-dl],
-                              [only look for dl providers under default location if FI_PROVIDER_PATH is not set])],
+                              [only look for dl providers under default location if FI_PROVIDER_PATH is not set.  Enable this for large systems to reduce dlopen() traffic during job startup.])],
               [restricted_dl=1],
               [])
 AC_DEFINE_UNQUOTED([HAVE_RESTRICTED_DL], [$restricted_dl],

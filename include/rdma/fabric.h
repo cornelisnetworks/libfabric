@@ -73,7 +73,7 @@ extern "C" {
 #endif
 
 #define FI_MAJOR_VERSION 2
-#define FI_MINOR_VERSION 2
+#define FI_MINOR_VERSION 4
 #define FI_REVISION_VERSION 0
 
 /* Removing these breaks the build for some apps.
@@ -777,6 +777,8 @@ enum fi_type {
 	FI_TYPE_MR_ATTR,
 	FI_TYPE_CNTR_ATTR,
 	FI_TYPE_CQ_ERR_ENTRY,
+	FI_TYPE_CQ_WAIT_COND,
+	FI_TYPE_WAIT_OBJ,
 };
 
 char *fi_tostr(const void *data, enum fi_type datatype);
