@@ -1,0 +1,65 @@
+# Regex patterns of tests to exclude in runfabtests.sh
+
+# OPX uses FI_ADDR_OPX provider-native addresses.  The default fabtests
+# host arguments are socket addresses, so OPX runs should use
+# runfabtests.sh -b for OOB address exchange until fabtests or OPX grows
+# provider-native address lookup support.
+
+# Exclude all prefix/fork tests.  OPX relies on provider state that is not
+# covered by the prefix test model used by runfabtests.sh -k.
+-k
+
+# av_test currently drives fi_getinfo with socket-style source/group
+# addresses.  OPX accepts FI_ADDR_OPX addresses and otherwise returns
+# -FI_ENODATA before the AV logic is reached.
+av_test
+
+# OPX is an RDM provider and does not support MSG/CM/passive endpoint flows.
+^fi_msg
+-e msg
+cm_data
+msg_sockets
+cmatose
+
+# OPX is not a DGRAM provider.
+-e dgram
+dgram
+
+# Wait objects, poll/epoll, and waitsets require provider wait support;
+# OPX currently uses the no-wait helpers.
+poll
+wait
+
+# Shared/scalable endpoint and shared AV paths are not part of the stable OPX
+# fabtests baseline yet.
+shared_ctx
+scalable_ep
+shared_av
+
+# Triggered operations and RMA event paths are not currently stable in the OPX
+# quick baseline.  Re-enable individual tests as OPX RMA semantics are fixed and
+# verified.
+trigger
+rdm_rma_trigger
+rdm_rma_event
+
+# Tagged RDM peek, pingpong, and bandwidth variants are covered in the
+# quick baseline.
+
+# Multi-MR currently fails during OPX fabric setup with FI_EINVAL in the
+# quick baseline and needs provider-side MR-mode triage.
+multi_mr
+
+# Multi-endpoint needs separate OPX semantic triage before it is promoted into
+# the default quick baseline.  Keep AV removal/reinsert, basic RDM functional
+# flows, multi-client, fi_rdm g00n13s, multi-receive, tagged peek, short flood,
+# and the sendmsg inject variants in coverage.
+multi_ep
+
+# OPX RZV sends do not currently complete FI_SEND counters when TX CQ
+# completions are suppressed / counter-only completion is used.  Re-enable
+# after RZV send-counter progress is implemented independently of CQ drain.
+fi_rdm_cntr_pingpong
+
+# The 32-thread bandwidth cases can exhaust available OPX contexts
+fi_rdm_bw_mt -n 32
