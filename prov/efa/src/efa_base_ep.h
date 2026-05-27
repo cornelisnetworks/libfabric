@@ -76,7 +76,6 @@ struct efa_base_ep {
 	struct fi_info *info;
 	size_t rnr_retry;
 	struct efa_ep_addr src_addr;
-	struct efa_ah *self_ah;
 
 	bool util_ep_initialized;
 	bool efa_qp_enabled;
@@ -90,10 +89,13 @@ struct efa_base_ep {
 	size_t inject_msg_size;		/**< #FI_OPT_INJECT_MSG_SIZE */
 	size_t inject_rma_size;		/**< #FI_OPT_INJECT_RMA_SIZE */
 
-	/* Only used by RDM ep type */
-	struct efa_qp *user_recv_qp; /* Separate qp to receive pkts posted by users */
-	struct efa_recv_wr *user_recv_wr_vec;
 	bool use_unsolicited_write_recv;
+
+	/* entry for efa_domain->base_ep_list */
+	struct dlist_entry base_ep_entry;
+	/* Only used by EFA direct */
+	struct ofi_bufpool *efa_direct_ope_pool;	/**< pool for efa_direct_ope */
+	struct dlist_entry efa_direct_ope_list;	/**< list of outstanding ops */
 };
 
 int efa_base_ep_bind_av(struct efa_base_ep *base_ep, struct efa_av *av);
@@ -152,10 +154,25 @@ int efa_base_ep_insert_cntr_ibv_cq_poll_list(struct efa_base_ep *ep);
 
 void efa_base_ep_remove_cntr_ibv_cq_poll_list(struct efa_base_ep *ep);
 
-int efa_base_ep_create_and_enable_qp(struct efa_base_ep *ep, bool create_user_recv_qp);
+int efa_base_ep_create_and_enable_qp(struct efa_base_ep *ep);
+
+void efa_base_ep_construct_ibv_qp_init_attr_ex(struct efa_base_ep *ep,
+						struct ibv_qp_init_attr_ex *attr_ex,
+						struct ibv_cq_ex *tx_cq,
+						struct ibv_cq_ex *rx_cq);
 
 #if ENABLE_DEBUG
 void efa_ep_addr_print(char *prefix, struct efa_ep_addr *addr);
 #endif
+
+static inline size_t efa_base_ep_get_rx_pool_size(struct efa_base_ep *base_ep)
+{
+	return MIN(base_ep->domain->device->rdm_info->rx_attr->size, base_ep->info->rx_attr->size);
+}
+
+static inline size_t efa_base_ep_get_tx_pool_size(struct efa_base_ep *base_ep)
+{
+	return MIN(base_ep->domain->device->rdm_info->tx_attr->size, base_ep->info->tx_attr->size);
+}
 
 #endif

@@ -60,17 +60,17 @@ ssize_t fi_inject_writedata(struct fid_ep *ep, const void *buf, size_t len,
 
 *buf*
 : Local data buffer to read into (read target) or write from (write
-  source)
+  source). For 0-byte operations, buf may be ignored.
 
 *len*
 : Length of data to read or write, specified in bytes.  Valid
   transfers are from 0 bytes up to the endpoint's max_msg_size.
 
 *iov*
-: Vectored data buffer.
+: Vectored data buffer. For 0-byte operations, iov may be ignored.
 
 *count*
-: Count of vectored data entries.
+: Count of vectored data entries. For 0-byte operations, count may be 0.
 
 *addr*
 : Address of remote memory to access.  This will be the virtual
@@ -81,8 +81,8 @@ ssize_t fi_inject_writedata(struct fid_ep *ep, const void *buf, size_t len,
 : Protection key associated with the remote memory.
 
 *desc*
-: Descriptor associated with the local data buffer
-  See [`fi_mr`(3)](fi_mr.3.html).
+: Descriptor associated with the local data buffer. For 0-byte operations,
+  desc may be ignored even for FI_MR_LOCAL. See [`fi_mr`(3)](fi_mr.3.html).
 
 *data*
 : Remote CQ data to transfer with the operation.
@@ -175,10 +175,17 @@ struct fi_rma_iov {
 };
 ```
 
+For 0-byte operations, msg_iov, desc (including FI_MR_LOCAL), and iov_count may be ignored.
+
 ## fi_inject_write
 
 The write inject call is an optimized version of fi_write.  It provides
 similar completion semantics as fi_inject [`fi_msg`(3)](fi_msg.3.html).
+
+If FI_HMEM is enabled and the provider requires the FI_MR_HMEM mr_mode,
+the fi_inject_write call can only accept buffers with iface equal to
+FI_HMEM_SYSTEM. This limitation does not affect how inject_size is
+reported.
 
 ## fi_writedata
 
@@ -189,8 +196,7 @@ transfer.
 ## fi_inject_writedata
 
 The inject write data call is similar to fi_inject_write, but allows for the sending
-of remote CQ data (see FI_REMOTE_CQ_DATA flag) as part of the
-transfer.
+of remote CQ data (see FI_REMOTE_CQ_DATA flag) as part of the transfer.
 
 ## fi_read
 
@@ -235,7 +241,10 @@ fi_writemsg.
 : Indicates that the user has additional requests that will
   immediately be posted after the current call returns.  Use of this
   flag may improve performance by enabling the provider to optimize
-  its access to the fabric hardware.
+  its access to the fabric hardware.  Providers that utilize delayed
+  start optimizations for communication calls with FI_MORE flag set
+  must ensure that all previously delayed calls be flushed when an
+  error is returned from a new call.
 
 *FI_INJECT*
 : Applies to fi_writemsg.  Indicates that the outbound data buffer
@@ -243,7 +252,10 @@ fi_writemsg.
    returns, even if the operation is handled asynchronously.  This may
    require that the underlying provider implementation copy the data
    into a local buffer and transfer out of that buffer. This flag can only
-   be used with messages smaller than inject_size.
+   be used with messages smaller than inject_size. If FI_HMEM is
+   enabled and the provider requires the FI_MR_HMEM mr_mode, the
+   FI_INJECT flag can only be used with buffers whose iface is
+   FI_HMEM_SYSTEM.
 
 *FI_INJECT_COMPLETE*
 : Applies to fi_writemsg.  Indicates that a completion should be

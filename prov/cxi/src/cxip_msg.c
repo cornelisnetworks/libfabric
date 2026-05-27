@@ -467,6 +467,13 @@ void cxip_rxc_record_req_stat(struct cxip_rxc *rxc, enum c_ptl_list list,
 
 /*
  * cxip_recv_cancel() - Cancel outstanding receive request.
+ *
+ * Per fi_cancel semantics, cancel is best-effort: if the operation is still
+ * pending it can be canceled, but an in-progress operation (RDMA in flight)
+ * cannot be rolled back.
+ *
+ * When a rendezvous Get is in flight (rdzv_events > 0), return -FI_ENOENT to
+ * signal that the cancel did not take effect.
  */
 int cxip_recv_cancel(struct cxip_req *req)
 {
@@ -477,11 +484,23 @@ int cxip_recv_cancel(struct cxip_req *req)
 	 * or software receive list.
 	 */
 	if (!req->recv.hw_offloaded) {
-		dlist_remove_init(&req->recv.rxc_entry);
-		req->recv.canceled = true;
-		req->recv.unlinked = true;
-		cxip_recv_req_report(req);
-		cxip_recv_req_free(req);
+		if (req->recv.rdzv_events) {
+			/* RDMA in flight — cannot cancel.  Return -FI_ENOENT
+			 * so callers (e.g. OpenMPI MTL) know immediately that
+			 * the cancel did not take effect.  The rendezvous will
+			 * complete normally via rdzv_recv_req_event().
+			 */
+			RXC_DBG(rxc,
+				"Cancel refused: RDMA in flight, req: %p rdzv_events: %d\n",
+				req, req->recv.rdzv_events);
+			ret = -FI_ENOENT;
+		} else {
+			dlist_remove_init(&req->recv.rxc_entry);
+			req->recv.canceled = true;
+			req->recv.unlinked = true;
+			cxip_recv_req_report(req);
+			cxip_recv_req_free(req);
+		}
 	} else {
 		ret = cxip_pte_unlink(rxc->rx_pte, C_PTL_LIST_PRIORITY,
 				req->req_id, rxc->rx_cmdq);
@@ -1078,6 +1097,33 @@ struct fi_ops_tagged cxip_ep_tagged_no_rx_ops = {
 	.injectdata = cxip_tinjectdata,
 };
 
+/* Tagged ops with writedata disabled (cq_data_size == 0) */
+struct fi_ops_tagged cxip_ep_tagged_ops_no_writedata = {
+	.size = sizeof(struct fi_ops_tagged),
+	.recv = cxip_trecv,
+	.recvv = cxip_trecvv,
+	.recvmsg = cxip_trecvmsg,
+	.send = cxip_tsend,
+	.sendv = cxip_tsendv,
+	.sendmsg = cxip_tsendmsg,
+	.inject = cxip_tinject,
+	.senddata = fi_no_tagged_senddata,
+	.injectdata = fi_no_tagged_injectdata,
+};
+
+struct fi_ops_tagged cxip_ep_tagged_no_rx_ops_no_writedata = {
+	.size = sizeof(struct fi_ops_tagged),
+	.recv = fi_no_tagged_recv,
+	.recvv = fi_no_tagged_recvv,
+	.recvmsg = fi_no_tagged_recvmsg,
+	.send = cxip_tsend,
+	.sendv = cxip_tsendv,
+	.sendmsg = cxip_tsendmsg,
+	.inject = cxip_tinject,
+	.senddata = fi_no_tagged_senddata,
+	.injectdata = fi_no_tagged_injectdata,
+};
+
 static ssize_t cxip_recv(struct fid_ep *fid_ep, void *buf, size_t len,
 			 void *desc, fi_addr_t src_addr, void *context)
 {
@@ -1326,3 +1372,31 @@ struct fi_ops_msg cxip_ep_msg_no_rx_ops = {
 	.senddata = cxip_senddata,
 	.injectdata = cxip_injectdata,
 };
+
+/* Message ops with writedata disabled (cq_data_size == 0) */
+struct fi_ops_msg cxip_ep_msg_ops_no_writedata = {
+	.size = sizeof(struct fi_ops_msg),
+	.recv = cxip_recv,
+	.recvv = cxip_recvv,
+	.recvmsg = cxip_recvmsg,
+	.send = cxip_send,
+	.sendv = cxip_sendv,
+	.sendmsg = cxip_sendmsg,
+	.inject = cxip_inject,
+	.senddata = fi_no_msg_senddata,
+	.injectdata = fi_no_msg_injectdata,
+};
+
+struct fi_ops_msg cxip_ep_msg_no_rx_ops_no_writedata = {
+	.size = sizeof(struct fi_ops_msg),
+	.recv = fi_no_msg_recv,
+	.recvv = fi_no_msg_recvv,
+	.recvmsg = fi_no_msg_recvmsg,
+	.send = cxip_send,
+	.sendv = cxip_sendv,
+	.sendmsg = cxip_sendmsg,
+	.inject = cxip_inject,
+	.senddata = fi_no_msg_senddata,
+	.injectdata = fi_no_msg_injectdata,
+};
+

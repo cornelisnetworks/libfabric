@@ -43,6 +43,9 @@ void test_info_open_ep_with_wrong_info()
 
 	err = fi_close(&fabric->fid);
 	assert_int_equal(err, 0);
+
+	fi_freeinfo(info);
+	fi_freeinfo(hints);
 }
 
 /**
@@ -66,10 +69,14 @@ void test_info_rdm_attributes()
 		assert_int_equal(info->ep_attr->max_msg_size, UINT64_MAX);
 		assert_int_equal(info->domain_attr->progress, FI_PROGRESS_MANUAL);
 		assert_int_equal(info->domain_attr->control_progress, FI_PROGRESS_MANUAL);
+		assert_int_equal(info->domain_attr->cntr_cnt, g_efa_selected_device_list[0].max_comp_cntr);
 #if EFA_HAVE_NON_SYSTEM_HMEM
 		assert_true(info->caps | FI_HMEM);
 #endif
 	}
+
+	fi_freeinfo(info_head);
+	fi_freeinfo(hints);
 }
 
 /**
@@ -91,6 +98,9 @@ void test_info_dgram_attributes()
 		assert_true(!strcmp(info->fabric_attr->name, EFA_FABRIC_NAME));
 		assert_true(strstr(info->domain_attr->name, "dgrm"));
 	}
+
+	fi_freeinfo(info_head);
+	fi_freeinfo(hints);
 }
 
 /**
@@ -498,6 +508,8 @@ void test_info_check_shm_info_hmem()
 
 	hints->caps &= ~FI_HMEM;
 	test_info_check_shm_info_from_hints(hints);
+
+	fi_freeinfo(hints);
 }
 
 void test_info_check_shm_info_op_flags()
@@ -513,6 +525,8 @@ void test_info_check_shm_info_op_flags()
 	hints->tx_attr->op_flags |= FI_DELIVERY_COMPLETE;
 	hints->rx_attr->op_flags |= FI_MULTI_RECV;
 	test_info_check_shm_info_from_hints(hints);
+
+	fi_freeinfo(hints);
 }
 
 void test_info_check_shm_info_threading()
@@ -523,6 +537,8 @@ void test_info_check_shm_info_threading()
 
 	hints->domain_attr->threading = FI_THREAD_DOMAIN;
 	test_info_check_shm_info_from_hints(hints);
+
+	fi_freeinfo(hints);
 }
 
 /**
@@ -606,6 +622,7 @@ void check_no_hmem_support_when_not_requested(char *fabric_name)
 	assert_non_null(info);
 	assert_false(info->caps & FI_HMEM);
 	fi_freeinfo(info);
+	fi_freeinfo(hints);
 }
 
 /**
@@ -632,6 +649,7 @@ void test_info_direct_unsupported()
 	err = fi_getinfo(FI_VERSION(1,6), NULL, NULL, 0, hints, &info);
 	assert_int_equal(err, 0);
 	assert_non_null(info);
+	fi_freeinfo(info);
 
 	hints->caps |= FI_ATOMIC;
 	err = fi_getinfo(FI_VERSION(1,6), NULL, NULL, 0, hints, &info);
@@ -644,6 +662,8 @@ void test_info_direct_unsupported()
 	err = fi_getinfo(FI_VERSION(1,6), NULL, NULL, 0, hints, &info);
 	assert_int_equal(err, -FI_ENODATA);
 	assert_null(info);
+
+	fi_freeinfo(hints);
 }
 
 /**
@@ -680,6 +700,9 @@ void test_info_direct_ordering()
 	assert_true(efa_returned);
 	assert_true(efa_returned_after_efa_direct);
 	assert_false(efa_direct_returned_after_efa);
+
+	fi_freeinfo(info_head);
+	fi_freeinfo(hints);
 }
 
 /**
@@ -722,6 +745,7 @@ void test_use_device_rdma( const int env_val,
 		/* cannot test USE_DEVICE_RDMA=1, hardware
 		   doesn't support it, and will abort() */
 		fi_freeinfo(info);
+		fi_freeinfo(hints);
 		skip();
 		return;
 	}
@@ -759,6 +783,7 @@ void test_use_device_rdma( const int env_val,
 	assert_int_equal(fi_close(&domain->fid), 0);
 	assert_int_equal(fi_close(&fabric->fid), 0);
 	fi_freeinfo(info);
+	fi_freeinfo(hints);
 
 	return;
 }
@@ -1015,8 +1040,10 @@ void test_info_direct_null_hints_return_rma_and_rx_cq_data()
 		assert_true(info->caps & FI_RMA);
 		assert_true(info->tx_attr->caps & OFI_TX_RMA_CAPS);
 		assert_true(info->rx_attr->caps & OFI_RX_RMA_CAPS);
-		fi_freeinfo(info);
 	}
+
+	if (!err)
+		fi_freeinfo(info);
 }
 
 /**
@@ -1053,4 +1080,254 @@ void test_info_direct_no_rma_no_rx_cq_data_when_no_unsolicited_write_recv()
 void test_info_direct_rma_without_rx_cq_data_when_unsolicited_write_recv_supported()
 {
 	test_info_direct_rma_common(true, true, false, 0, 4, false, true);
+}
+
+/**
+ * @brief Test that efa-direct succeeds when hints request FI_MSG only with small max_msg_size
+ */
+void test_info_direct_msg_only_small_max_msg_size_success()
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+
+	/* Request FI_MSG only with small max_msg_size (within device MSG limit) */
+	hints->caps = FI_MSG; /* Explicitly set to FI_MSG only */
+	hints->ep_attr->max_msg_size = g_efa_selected_device_list[0].ibv_port_attr.max_msg_sz - 1;
+
+	/* Should succeed */
+	err = fi_getinfo(FI_VERSION(1, 18), NULL, NULL, 0ULL, hints, &info);
+	assert_int_equal(err, 0);
+	assert_non_null(info);
+	assert_int_equal(info->ep_attr->max_msg_size, g_efa_selected_device_list[0].ibv_port_attr.max_msg_sz);
+	fi_freeinfo(info);
+
+	fi_freeinfo(hints);
+}
+
+/**
+ * @brief Test that efa-direct fails when hints request FI_MSG only with large max_msg_size
+ */
+void test_info_direct_msg_only_large_max_msg_size_fail()
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+
+	/* Request FI_MSG only with large max_msg_size (exceeds device MSG limit) */
+	hints->caps = FI_MSG; /* Explicitly set to FI_MSG only */
+	hints->ep_attr->max_msg_size = g_efa_selected_device_list[0].ibv_port_attr.max_msg_sz + 1;
+
+	/* Should fail with -FI_ENODATA */
+	err = fi_getinfo(FI_VERSION(1, 18), NULL, NULL, 0ULL, hints, &info);
+	assert_int_equal(err, -FI_ENODATA);
+	assert_null(info);
+
+	fi_freeinfo(hints);
+}
+
+/**
+ * @brief Test that efa-direct succeeds when hints request FI_MSG+FI_RMA with large max_msg_size
+ */
+void test_info_direct_msg_rma_large_max_msg_size_success()
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	/* Skip test if RDMA read or write not supported */
+	if (!efa_device_support_rdma_read() || !efa_device_support_rdma_write()) {
+		skip();
+		return;
+	}
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+
+	/* Request FI_MSG + FI_RMA with large max_msg_size (> 8KB but within device RDMA limit) */
+	hints->caps = FI_MSG | FI_RMA;
+	hints->mode |= FI_RX_CQ_DATA; /* Support FI_RX_CQ_DATA for RMA */
+	hints->ep_attr->max_msg_size = g_efa_selected_device_list[0].ibv_port_attr.max_msg_sz + 1024; /* > 8KB */
+
+	/* Should succeed */
+	err = fi_getinfo(FI_VERSION(1, 18), NULL, NULL, 0ULL, hints, &info);
+	assert_int_equal(err, 0);
+	assert_non_null(info);
+	assert_int_equal(info->ep_attr->max_msg_size, g_efa_selected_device_list[0].max_rdma_size);
+	fi_freeinfo(info);
+
+	fi_freeinfo(hints);
+}
+
+/**
+ * @brief Test that efa-direct fails when hints request FI_MSG+FI_RMA with too large max_msg_size
+ */
+void test_info_direct_msg_rma_too_large_max_msg_size_fail()
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	/* Skip test if RDMA read or write not supported */
+	if (!efa_device_support_rdma_read() || !efa_device_support_rdma_write()) {
+		skip();
+		return;
+	}
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+
+	/* Request FI_MSG + FI_RMA with too large max_msg_size (> device RDMA limit) */
+	hints->caps = FI_MSG | FI_RMA;
+	hints->mode |= FI_RX_CQ_DATA; /* Support FI_RX_CQ_DATA for RMA */
+	hints->ep_attr->max_msg_size = g_efa_selected_device_list[0].max_rdma_size + 1;
+
+	/* Should fail with -FI_ENODATA */
+	err = fi_getinfo(FI_VERSION(1, 18), NULL, NULL, 0ULL, hints, &info);
+	assert_int_equal(err, -FI_ENODATA);
+	assert_null(info);
+
+	fi_freeinfo(hints);
+}
+
+static uint32_t saved_comp_count_max_value;
+static uint32_t saved_err_count_max_value;
+
+static void mock_cntr_max_values(uint32_t value)
+{
+	saved_comp_count_max_value = g_efa_selected_device_list[0].comp_count_max_value;
+	saved_err_count_max_value = g_efa_selected_device_list[0].err_count_max_value;
+	g_efa_selected_device_list[0].comp_count_max_value = value;
+	g_efa_selected_device_list[0].err_count_max_value = value;
+}
+
+static void restore_cntr_max_values(void)
+{
+	g_efa_selected_device_list[0].comp_count_max_value = saved_comp_count_max_value;
+	g_efa_selected_device_list[0].err_count_max_value = saved_err_count_max_value;
+}
+
+/**
+ * @brief Verify max_cntr_value is UINT64_MAX for API version < 2.5
+ */
+void test_info_max_cntr_value_api_lt_2_5(struct efa_resource **state)
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	mock_cntr_max_values((1ULL << 31) - 1);
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+
+	err = fi_getinfo(FI_VERSION(2, 4), NULL, NULL, 0, hints, &info);
+	assert_int_equal(err, 0);
+	assert_int_equal(info->domain_attr->max_cntr_value, UINT64_MAX);
+	assert_int_equal(info->domain_attr->max_err_cntr_value, UINT64_MAX);
+
+	fi_freeinfo(info);
+	fi_freeinfo(hints);
+	restore_cntr_max_values();
+}
+
+/**
+ * @brief Verify max_cntr_value returns HW max when user does not hint a value
+ * for API version >= 2.5
+ */
+void test_info_max_cntr_value_api_ge_2_5_within_hw_range(struct efa_resource **state)
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	mock_cntr_max_values((1ULL << 31) - 1);
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+	hints->domain_attr->max_cntr_value = 0;
+
+	err = fi_getinfo(FI_VERSION(2, 5), NULL, NULL, 0, hints, &info);
+	assert_int_equal(err, 0);
+	assert_int_equal(info->domain_attr->max_cntr_value, (1ULL << 31) - 1);
+	assert_int_equal(info->domain_attr->max_err_cntr_value, (1ULL << 31) - 1);
+
+	fi_freeinfo(info);
+	fi_freeinfo(hints);
+	restore_cntr_max_values();
+}
+
+/**
+ * @brief Verify max_cntr_value returns HW max when user hint is within HW range
+ * for API version >= 2.5
+ */
+void test_info_max_cntr_value_api_ge_2_5_hint_within_hw_range(struct efa_resource **state)
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	mock_cntr_max_values((1ULL << 31) - 1);
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+	hints->domain_attr->max_cntr_value = 1000;
+	hints->domain_attr->max_err_cntr_value = 2000;
+
+	err = fi_getinfo(FI_VERSION(2, 5), NULL, NULL, 0, hints, &info);
+	assert_int_equal(err, 0);
+	assert_int_equal(info->domain_attr->max_cntr_value, (1ULL << 31) - 1);
+	assert_int_equal(info->domain_attr->max_err_cntr_value, (1ULL << 31) - 1);
+
+	fi_freeinfo(info);
+	fi_freeinfo(hints);
+	restore_cntr_max_values();
+}
+
+/**
+ * @brief Verify max_cntr_value falls back to UINT64_MAX when user requests above HW range
+ * for API version >= 2.5
+ */
+void test_info_max_cntr_value_api_ge_2_5_above_hw_range(struct efa_resource **state)
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	mock_cntr_max_values((1ULL << 31) - 1);
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	assert_non_null(hints);
+	hints->domain_attr->max_cntr_value = (1ULL << 31);
+
+	err = fi_getinfo(FI_VERSION(2, 5), NULL, NULL, 0, hints, &info);
+	assert_int_equal(err, 0);
+	assert_int_equal(info->domain_attr->max_cntr_value, UINT64_MAX);
+	assert_int_equal(info->domain_attr->max_err_cntr_value, UINT64_MAX);
+
+	fi_freeinfo(info);
+	fi_freeinfo(hints);
+	restore_cntr_max_values();
+}
+
+/**
+ * @brief Verify max_cntr_value is always UINT64_MAX for EFA_FABRIC_NAME
+ */
+void test_info_rdm_max_cntr_value_api_ge_2_5_within_hw_range(struct efa_resource **state)
+{
+	struct fi_info *hints, *info;
+	int err;
+
+	mock_cntr_max_values((1ULL << 31) - 1);
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
+	assert_non_null(hints);
+	hints->domain_attr->max_cntr_value = 0;
+
+	err = fi_getinfo(FI_VERSION(2, 5), NULL, NULL, 0, hints, &info);
+	assert_int_equal(err, 0);
+	assert_int_equal(info->domain_attr->max_cntr_value, UINT64_MAX);
+	assert_int_equal(info->domain_attr->max_err_cntr_value, UINT64_MAX);
+
+	fi_freeinfo(info);
+	fi_freeinfo(hints);
+	restore_cntr_max_values();
 }

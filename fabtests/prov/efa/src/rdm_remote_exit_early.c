@@ -39,14 +39,16 @@
 #include <rdma/fi_ext.h>
 
 static bool post_rx = false;
+static bool homogeneous_peers = true;
 
 enum {
 	LONG_OPT_POST_RX,
+	LONG_OPT_HETEROGENEOUS_PEERS,
 };
 
 static int run()
 {
-	int ret;
+	int ret, cleanup_ret;
 	bool use_emulated_read;
 
 	ret = ft_init_fabric();
@@ -57,6 +59,14 @@ static int run()
 
 	/* Bind eq to ep so it can write eq error for EFA_RDM_OPE_INTERNAL */
 	FT_EP_BIND(ep, eq, 0);
+
+	ret = fi_setopt(&ep->fid, FI_OPT_ENDPOINT,
+			FI_OPT_EFA_HOMOGENEOUS_PEERS,
+			&homogeneous_peers, sizeof homogeneous_peers);
+	if (ret) {
+		FT_PRINTERR("fi_setopt(FI_OPT_EFA_HOMOGENEOUS_PEERS)", ret);
+		goto out;
+	}
 
 	ret = fi_getopt(&ep->fid, FI_OPT_ENDPOINT, FI_OPT_EFA_EMULATED_READ,
 			&use_emulated_read, &(size_t) {sizeof use_emulated_read});
@@ -82,6 +92,21 @@ static int run()
 			goto out;
 		}
 	} else {
+		/*
+		 * Two syncs are needed to guarantee the handshake is
+		 * fully processed on both sides. The first sync triggers
+		 * the handshake exchange, but the handshake packet may
+		 * not be processed before ft_sync_inband returns. The
+		 * second sync ensures both sides have polled the CQ
+		 * enough to process the peer's handshake, so the sender
+		 * selects the longread protocol for large messages.
+		 */
+		ret = ft_sync_inband(true);
+		if (ret) {
+			FT_PRINTERR("ft_sync_inband", -ret);
+			goto out;
+		}
+
 		ret = ft_sync_inband(false);
 		if (ret) {
 			FT_PRINTERR("ft_sync_inband", -ret);
@@ -139,33 +164,15 @@ static int run()
 
 			ft_stop();
 			if ((end.tv_sec - start.tv_sec) > timeout) {
-				if (post_rx) {
-					if (use_emulated_read || opts.transfer_size < 1048576) {
-						/*
-						 * RDMA read is not available. If long CTS is used and
-						 * sender exits before sending CTS data, receiver is
-						 * expected to timeout after sending the CTS packet
-						 * without getting a cq entry or cq error.
-						 */
-						printf("server timeout\n");
-						ret = 0;
-					} else {
-						/*
-						 * RDMA read is available.
-						 * When server posts a recv, it is expected
-						 * to get a cq entry or cq error.
-						 */
-						fprintf(stderr, "%ds timeout expired\n", timeout);
-						ret = -FI_ENODATA;
-					}
-				} else {
-					/*
-					 * If no recv is posted, it should just
-					 * poll some cq in the timeout range and exit.
-					 */
-					printf("server polls cq and exits\n");
-					ret = 0;
-				}
+				/*
+				 * Timeout is a valid outcome. The client's
+				 * RTM may never be transmitted if the QP is
+				 * destroyed before the device sends it. Also,
+				 * if long-CTS is used instead of longread,
+				 * no CQ error is expected on timeout.
+				 */
+				printf("%ds server timeout expired\n", timeout);
+				ret = 0;
 				goto out;
 			}
 
@@ -193,9 +200,9 @@ static int run()
 	}
 
 out:
-	ft_free_res();
+	cleanup_ret = ft_free_res();
 
-	return ret;
+	return ret ? ret : cleanup_ret;
 }
 
 int main(int argc, char **argv)
@@ -213,6 +220,7 @@ int main(int argc, char **argv)
 	int lopt_idx = 0;
 	struct option long_opts[] = {
 		{"post-rx", no_argument, NULL, LONG_OPT_POST_RX},
+		{"heterogeneous-peers", no_argument, NULL, LONG_OPT_HETEROGENEOUS_PEERS},
 		{0, 0, 0, 0}
 	};
 	while ((op = getopt_long(argc, argv, ADDR_OPTS INFO_OPTS CS_OPTS API_OPTS,
@@ -229,6 +237,9 @@ int main(int argc, char **argv)
 		case LONG_OPT_POST_RX:
 			post_rx = true;
 			break;
+		case LONG_OPT_HETEROGENEOUS_PEERS:
+			homogeneous_peers = false;
+			break;
 		case '?':
 		case 'h':
 			ft_usage(argv[0], "RDM remote exit early test");
@@ -236,6 +247,9 @@ int main(int argc, char **argv)
 			FT_PRINT_OPTS_USAGE( "--post-rx",
 					    "Receiver posts fi_recv. "
 						"By default receiver does not post receive.\n");
+			FT_PRINT_OPTS_USAGE( "--heterogeneous-peers",
+					    "Disable homogeneous peers assumption. "
+						"Use when testing across different instance types.\n");
 			return EXIT_FAILURE;
 		}
 	}

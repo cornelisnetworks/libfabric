@@ -4,7 +4,7 @@
 #include "efa.h"
 #include "efa_hmem.h"
 #include "efa_mr.h"
-#include "efa_tp.h"
+#include "rdm/efa_rdm_tracepoint.h"
 #include "rdm/efa_rdm_pkt_type.h"
 
 struct efa_hmem_info g_efa_hmem_info[OFI_HMEM_MAX];
@@ -143,22 +143,32 @@ static inline void efa_hmem_info_check_p2p_support_cuda(struct efa_hmem_info *in
 	}
 
 #if HAVE_EFA_DMABUF_MR
-	ret = cuda_get_dmabuf_fd(ptr, len, &dmabuf_fd, &dmabuf_offset);
-	if (ret == FI_SUCCESS) {
-		ibv_mr = ibv_reg_dmabuf_mr(ibv_pd, dmabuf_offset,
-					   len, (uint64_t)ptr, dmabuf_fd, ibv_access);
-		(void)cuda_put_dmabuf_fd(dmabuf_fd);
-		if (!ibv_mr) {
+	if (ofi_hmem_is_dmabuf_env_var_enabled(FI_HMEM_CUDA)) {
+		ret = ofi_hmem_get_dmabuf_fd(FI_HMEM_CUDA, ptr, len, &dmabuf_fd, &dmabuf_offset);
+		if (ret == FI_SUCCESS) {
+			ibv_mr = ibv_reg_dmabuf_mr(ibv_pd, dmabuf_offset,
+						   len, (uint64_t)ptr, dmabuf_fd, ibv_access);
+			(void)ofi_hmem_put_dmabuf_fd(FI_HMEM_CUDA, dmabuf_fd);
+			if (!ibv_mr) {
+				EFA_INFO(FI_LOG_CORE,
+					"Unable to register CUDA device buffer via dmabuf: %s. "
+					"Fall back to ibv_reg_mr\n", fi_strerror(-errno));
+				ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
+				info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
+			} else {
+				info->dmabuf_supported_by_device = EFA_DMABUF_SUPPORTED;
+			}
+		} else {
 			EFA_INFO(FI_LOG_CORE,
-				"Unable to register CUDA device buffer via dmabuf: %s. "
-				"Fall back to ibv_reg_mr\n", fi_strerror(-errno));
+				"Unable to retrieve dmabuf fd of CUDA device buffer: %d. "
+				"Fall back to ibv_reg_mr\n", ret);
 			ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
+			info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
 		}
 	} else {
-		EFA_INFO(FI_LOG_CORE,
-			"Unable to retrieve dmabuf fd of CUDA device buffer: %d. "
-			"Fall back to ibv_reg_mr\n", ret);
+		EFA_INFO(FI_LOG_CORE, "FI_HMEM_CUDA_USE_DMABUF set to false. Not using DMABUF for CUDA.\n");
 		ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
+		info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
 	}
 #else
 	ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
@@ -216,22 +226,32 @@ static inline void efa_hmem_info_check_p2p_support_rocr(struct efa_hmem_info *in
 	}
 
 #if HAVE_EFA_DMABUF_MR
-	ret = rocr_hmem_get_dmabuf_fd(ptr, len, &dmabuf_fd, &dmabuf_offset);
-	if (ret == FI_SUCCESS) {
-		ibv_mr = ibv_reg_dmabuf_mr(ibv_pd, dmabuf_offset,
-					   len, (uint64_t) ptr, dmabuf_fd, ibv_access);
-		(void) rocr_hmem_put_dmabuf_fd(dmabuf_fd);
-		if (!ibv_mr) {
+	if (ofi_hmem_is_dmabuf_env_var_enabled(FI_HMEM_ROCR)) {
+		ret = rocr_hmem_get_dmabuf_fd(ptr, len, &dmabuf_fd, &dmabuf_offset);
+		if (ret == FI_SUCCESS) {
+			ibv_mr = ibv_reg_dmabuf_mr(ibv_pd, dmabuf_offset,
+						   len, (uint64_t) ptr, dmabuf_fd, ibv_access);
+			(void) rocr_hmem_put_dmabuf_fd(dmabuf_fd);
+			if (!ibv_mr) {
+				EFA_INFO(FI_LOG_CORE,
+					"Unable to register ROCr device buffer via dmabuf: %s. "
+					"Fall back to ibv_reg_mr\n", fi_strerror(-errno));
+				ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
+				info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
+			} else {
+				info->dmabuf_supported_by_device = EFA_DMABUF_SUPPORTED;
+			}
+		} else {
 			EFA_INFO(FI_LOG_CORE,
-				"Unable to register ROCr device buffer via dmabuf: %s. "
-				"Fall back to ibv_reg_mr\n", fi_strerror(-errno));
+				"Unable to retrieve dmabuf fd of ROCr device buffer: %d. "
+				"Fall back to ibv_reg_mr\n", ret);
 			ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
+			info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
 		}
 	} else {
-		EFA_INFO(FI_LOG_CORE,
-			"Unable to retrieve dmabuf fd of ROCr device buffer: %d. "
-			"Fall back to ibv_reg_mr\n", ret);
+		EFA_INFO(FI_LOG_CORE, "FI_HMEM_ROCR_USE_DMABUF set to false. Not using DMABUF for ROCr.\n");
 		ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
+		info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
 	}
 #else
 	ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
@@ -263,82 +283,21 @@ static inline void efa_hmem_info_check_p2p_support_rocr(struct efa_hmem_info *in
 	return;
 }
 
-static inline void efa_hmem_info_check_p2p_support_neuron(struct efa_hmem_info *info) {
-#if HAVE_NEURON
-	struct ibv_mr *ibv_mr = NULL;
-	struct ibv_pd *ibv_pd;
-	int ibv_access = IBV_ACCESS_LOCAL_WRITE;
-	void *handle;
-	void *ptr = NULL;
-	size_t len = ofi_get_page_size() * 2;
-	int dmabuf_fd;
-	uint64_t offset;
-	int ret;
-
-	if (g_efa_selected_device_list[0].device_caps & EFADV_DEVICE_ATTR_CAPS_RDMA_READ) {
-		ibv_access |= IBV_ACCESS_REMOTE_READ;
+/**
+ * @brief Disable dmabuf if the environment variable is not enabled
+ *
+ * @param[in,out]  info        HMEM info struct to update
+ * @param[in]      iface       HMEM interface
+ */
+static void
+efa_hmem_info_disable_dmabuf_if_env_unset(struct efa_hmem_info *info,
+					  enum fi_hmem_iface iface)
+{
+	if (!ofi_hmem_is_dmabuf_env_var_enabled(iface)) {
+		info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
+		EFA_INFO(FI_LOG_CORE, "%s DMABUF disabled by environment variable\n",
+			 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
 	}
-
-	ptr = neuron_alloc(&handle, len);
-	/*
-	 * neuron_alloc will fail if application did not call nrt_init,
-	 * which is ok if it's not running neuron workloads. libfabric
-	 * will move on and leave info->initialized as false.
-	 */
-	if (!ptr) {
-		info->initialized = false;
-		EFA_INFO(FI_LOG_CORE, "Cannot allocate Neuron buffer\n");
-		return;
-	}
-
-	ibv_pd = ibv_alloc_pd(g_efa_selected_device_list[0].ibv_ctx);
-	if (!ibv_pd) {
-		EFA_WARN(FI_LOG_CORE, "failed to allocate ibv_pd: %d", errno);
-		neuron_free(&handle);
-		return;
-	}
-
-#if HAVE_EFA_DMABUF_MR
-	ret = neuron_get_dmabuf_fd(ptr, (uint64_t)len, &dmabuf_fd, &offset);
-	if (ret == FI_SUCCESS) {
-		ibv_mr = ibv_reg_dmabuf_mr(
-					ibv_pd, offset,
-					len, (uint64_t)ptr, dmabuf_fd, ibv_access);
-	} else if (ret == -FI_EOPNOTSUPP) {
-		EFA_INFO(FI_LOG_MR,
-			"Unable to retrieve dmabuf fd of Neuron device buffer, "
-			"Fall back to ibv_reg_mr\n");
-		ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
-	}
-#else
-	ibv_mr = ibv_reg_mr(ibv_pd, ptr, len, ibv_access);
-#endif
-
-	if (!ibv_mr) {
-		info->p2p_supported_by_device = false;
-		/* We do not expect to support Neuron on non p2p systems */
-		EFA_WARN(FI_LOG_CORE,
-		         "Failed to register Neuron buffer with the EFA device, "
-		         "FI_HMEM transfers that require peer to peer support will fail.\n");
-		neuron_free(&handle);
-		(void) ibv_dealloc_pd(ibv_pd);
-		return;
-	}
-
-	ret = ibv_dereg_mr(ibv_mr);
-	neuron_free(&handle);
-	(void) ibv_dealloc_pd(ibv_pd);
-	if (ret) {
-		EFA_WARN(FI_LOG_CORE,
-			 "Failed to deregister Neuron buffer: %s\n",
-			 fi_strerror(-ret));
-		return;
-	}
-
-	info->p2p_supported_by_device = true;
-	return;
-#endif
-	return;
 }
 
 /**
@@ -357,36 +316,80 @@ efa_hmem_info_init_iface(enum fi_hmem_iface iface)
 		return;
 	}
 
-	if ((iface == FI_HMEM_SYNAPSEAI || iface == FI_HMEM_NEURON) &&
-	    !efa_device_support_rdma_read()) {
-		EFA_WARN(FI_LOG_CORE,
-			 "No EFA RDMA read support, transfers using %s will fail.\n",
-			 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
-		return;
-	}
-
 	info->initialized = true;
+	info->p2p_supported_by_device = false;
+	info->dmabuf_fallback_enabled = false;
+#if HAVE_EFA_DMABUF_MR
+	info->dmabuf_supported_by_device = EFA_DMABUF_ASSUMED;
+#else /* !HAVE_EFA_DMABUF_MR */
+	info->dmabuf_supported_by_device = EFA_DMABUF_NOT_SUPPORTED;
+#endif /* HAVE_EFA_DMABUF_MR */
 
-	if (iface == FI_HMEM_SYNAPSEAI || iface == FI_HMEM_SYSTEM) {
-		info->p2p_supported_by_device = true;
-	} else if (ofi_hmem_p2p_disabled()) {
-		info->p2p_supported_by_device = false;
-	} else {
-		switch (iface) {
-		case FI_HMEM_CUDA:
-			efa_hmem_info_check_p2p_support_cuda(info);
-			break;
-		case FI_HMEM_ROCR:
-			efa_hmem_info_check_p2p_support_rocr(info);
-			break;
-		case FI_HMEM_NEURON:
-			efa_hmem_info_check_p2p_support_neuron(info);
-			break;
-		default:
-			break;
+	switch (iface) {
+	case FI_HMEM_NEURON:
+		if (ofi_hmem_p2p_disabled()) {
+			EFA_WARN(FI_LOG_CORE,
+				"%s requires p2p, unset FI_HMEM_DISABLE_P2P\n",
+				fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+			info->initialized = false;
+			return;
 		}
+		if (!efa_device_support_rdma_read()) {
+			EFA_WARN(FI_LOG_CORE,
+				 "No EFA RDMA read support, transfers using %s will fail.\n",
+				 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+			info->initialized = false;
+			return;
+		}
+		info->p2p_supported_by_device = true;
+		info->dmabuf_fallback_enabled = true;
+		efa_hmem_info_disable_dmabuf_if_env_unset(info, iface);
+		break;
+
+	case FI_HMEM_SYNAPSEAI:
+		if (ofi_hmem_p2p_disabled()) {
+			EFA_WARN(FI_LOG_CORE,
+				 "%s requires p2p, unset FI_HMEM_DISABLE_P2P\n",
+				 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+			info->initialized = false;
+			return;
+		}
+		if (!efa_device_support_rdma_read()) {
+			EFA_WARN(FI_LOG_CORE,
+				 "No EFA RDMA read support, transfers using %s will fail.\n",
+				 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+			info->initialized = false;
+			return;
+		}
+		info->p2p_supported_by_device = true;
+		efa_hmem_info_disable_dmabuf_if_env_unset(info, iface);
+		break;
+
+	case FI_HMEM_SYSTEM:
+		info->p2p_supported_by_device = true;
+		efa_hmem_info_disable_dmabuf_if_env_unset(info, iface);
+		break;
+
+	case FI_HMEM_CUDA:
+		if (ofi_hmem_p2p_disabled())
+			break;
+		efa_hmem_info_check_p2p_support_cuda(info);
 		if (!info->p2p_supported_by_device)
-			EFA_INFO(FI_LOG_CORE, "%s P2P support is not available.\n", fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+			EFA_INFO(FI_LOG_CORE, "%s P2P support is not available.\n",
+				 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+		break;
+
+	case FI_HMEM_ROCR:
+		if (ofi_hmem_p2p_disabled())
+			break;
+		efa_hmem_info_check_p2p_support_rocr(info);
+		if (!info->p2p_supported_by_device)
+			EFA_INFO(FI_LOG_CORE, "%s P2P support is not available.\n",
+				 fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
+		break;
+
+	default:
+		break;
 	}
 
 	efa_hmem_info_init_protocol_thresholds(iface);
@@ -483,26 +486,33 @@ int efa_hmem_info_initialize()
  */
 int efa_copy_from_hmem(void *desc, void *dest, const void *src, size_t size)
 {
-	struct efa_mr_peer peer = { .iface = FI_HMEM_SYSTEM };
+	struct efa_rdm_mr *efa_rdm_mr = (struct efa_rdm_mr *)desc;
+	enum fi_hmem_iface iface = FI_HMEM_SYSTEM;
+	uint64_t device = 0;
+	uint64_t flags = 0;
+	uint64_t hmem_data = 0;
 
-	if (desc)
-		peer = ((struct efa_mr *) desc)->peer;
+	if (efa_rdm_mr) {
+		iface = efa_rdm_mr->efa_mr.iface;
+		device = efa_rdm_mr->device;
+		flags = efa_rdm_mr->flags;
+		hmem_data = (uint64_t)efa_rdm_mr->hmem_data;
+	}
 
-	if (peer.flags & OFI_HMEM_DATA_DEV_REG_HANDLE) {
-		assert(peer.hmem_data);
-		switch (peer.iface) {
+	if (flags & OFI_HMEM_DATA_DEV_REG_HANDLE) {
+		switch (iface) {
 		/* TODO: Fine tune the max data size to switch from gdrcopy to cudaMemcpy */
 		case FI_HMEM_CUDA:
 		case FI_HMEM_ROCR:
-			efa_tracepoint(dev_reg_copy_from_hmem, &peer, dest, src, size);
-			return ofi_hmem_dev_reg_copy_from_hmem(peer.iface, (uint64_t) peer.hmem_data, dest, src, size);
+			efa_rdm_tracepoint(dev_reg_copy_from_hmem, iface, dest, src, size, hmem_data);
+			return ofi_hmem_dev_reg_copy_from_hmem(iface, hmem_data, dest, src, size);
 		default:
 			break;
 		}
 	}
 
-	efa_tracepoint(copy_from_hmem, &peer, dest, src, size);
-	return ofi_copy_from_hmem(peer.iface, peer.device, dest, src, size);
+	efa_rdm_tracepoint(copy_from_hmem, iface, dest, src, size, device);
+	return ofi_copy_from_hmem(iface, device, dest, src, size);
 };
 
 /**
@@ -516,26 +526,33 @@ int efa_copy_from_hmem(void *desc, void *dest, const void *src, size_t size)
  */
 int efa_copy_to_hmem(void *desc, void *dest, const void *src, size_t size)
 {
-	struct efa_mr_peer peer = { .iface = FI_HMEM_SYSTEM };
+	struct efa_rdm_mr *efa_rdm_mr = (struct efa_rdm_mr *)desc;
+	enum fi_hmem_iface iface = FI_HMEM_SYSTEM;
+	uint64_t device = 0;
+	uint64_t flags = 0;
+	uint64_t hmem_data = 0;
 
-	if (desc)
-		peer = ((struct efa_mr *) desc)->peer;
+	if (efa_rdm_mr) {
+		iface = efa_rdm_mr->efa_mr.iface;
+		device = efa_rdm_mr->device;
+		flags = efa_rdm_mr->flags;
+		hmem_data = (uint64_t)efa_rdm_mr->hmem_data;
+	}
 
-	if (peer.flags & OFI_HMEM_DATA_DEV_REG_HANDLE) {
-		assert(peer.hmem_data);
-		switch (peer.iface) {
+	if (flags & OFI_HMEM_DATA_DEV_REG_HANDLE) {
+		switch (iface) {
 		/* TODO: Fine tune the max data size to switch from gdrcopy to cudaMemcpy */
 		case FI_HMEM_CUDA:
 		case FI_HMEM_ROCR:
-			efa_tracepoint(dev_reg_copy_to_hmem, &peer, dest, src, size);
-			return ofi_hmem_dev_reg_copy_to_hmem(peer.iface, (uint64_t) peer.hmem_data, dest, src, size);
+			efa_rdm_tracepoint(dev_reg_copy_to_hmem, iface, dest, src, size, hmem_data);
+			return ofi_hmem_dev_reg_copy_to_hmem(iface, hmem_data, dest, src, size);
 		default:
 			break;
 		}
 	}
 
-	efa_tracepoint(copy_to_hmem, &peer, dest, src, size);
-	return ofi_copy_to_hmem(peer.iface, peer.device, dest, src, size);
+	efa_rdm_tracepoint(copy_to_hmem, iface, dest, src, size, device);
+	return ofi_copy_to_hmem(iface, device, dest, src, size);
 };
 
 /**

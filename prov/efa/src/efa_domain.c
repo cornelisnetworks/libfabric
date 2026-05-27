@@ -9,8 +9,11 @@
 #include "efa.h"
 #include "efa_av.h"
 #include "efa_cntr.h"
+#include "efa_hw_cntr.h"
+#include "rdm/efa_rdm_cntr.h"
 #include "rdm/efa_rdm_cq.h"
 #include "rdm/efa_rdm_atomic.h"
+#include "efa_rdm_mr.h"
 
 
 struct dlist_entry g_efa_domain_list;
@@ -101,19 +104,6 @@ static int efa_domain_init_device_and_pd(struct efa_domain *efa_domain,
 	return 0;
 }
 
-static int efa_domain_init_qp_table(struct efa_domain *efa_domain)
-{
-	size_t qp_table_size;
-
-	qp_table_size = roundup_power_of_two(efa_domain->device->ibv_attr.max_qp);
-	efa_domain->qp_table_sz_m1 = qp_table_size - 1;
-	efa_domain->qp_table = calloc(qp_table_size, sizeof(*efa_domain->qp_table));
-	if (!efa_domain->qp_table)
-		return -FI_ENOMEM;
-
-	return 0;
-}
-
 static int efa_domain_init_rdm(struct efa_domain *efa_domain, struct fi_info *info)
 {
 	struct fi_info *shm_info = NULL;
@@ -121,13 +111,29 @@ static int efa_domain_init_rdm(struct efa_domain *efa_domain, struct fi_info *in
 
 	assert(EFA_INFO_TYPE_IS_RDM(info));
 
+	/*
+	 * Open the MR cache if application did not set FI_MR_LOCAL
+	 * and the cache is enabled
+	 *
+	 * Explicit memory registrations from external application
+	 * should never go in the MR cache
+	 */
+	efa_domain->cache = NULL;
+	if (!efa_domain->mr_local && efa_mr_cache_enable) {
+		err = efa_rdm_mr_cache_open(&efa_domain->cache,
+						    efa_domain);
+		if (err)
+			return err;
+	}
+	efa_domain->util_domain.domain_fid.mr = &efa_rdm_domain_mr_ops;
+
 	efa_shm_info_create(info, &shm_info);
 	if (shm_info && !efa_domain->fabric->shm_fabric) {
 		err = fi_fabric(shm_info->fabric_attr,
 				&efa_domain->fabric->shm_fabric,
 				efa_domain->fabric->util_fabric.fabric_fid.fid.context);
 		if (err) {
-			EFA_WARN(FI_LOG_DOMAIN, 
+			EFA_WARN(FI_LOG_DOMAIN,
 				 "Failed to create shm_fabric: %s\n",
 				 fi_strerror(-err));
 			return err;
@@ -174,12 +180,22 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 		    struct fid_domain **domain_fid, void *context)
 {
 	struct efa_domain *efa_domain;
-	int ret = 0, err;
+	int ret, err;
 	bool use_lock;
 
 	efa_domain = calloc(1, sizeof(struct efa_domain));
 	if (!efa_domain)
 		return -FI_ENOMEM;
+
+	/* Initialize srx_lock first so efa_domain_close can always destroy it */
+	use_lock = info->domain_attr &&
+		   ofi_thread_level(info->domain_attr->threading) <= ofi_thread_level(FI_THREAD_COMPLETION);
+	err = ofi_genlock_init(&efa_domain->srx_lock, use_lock ? OFI_LOCK_MUTEX : OFI_LOCK_NOOP);
+	if (err) {
+		EFA_WARN(FI_LOG_DOMAIN, "srx lock init failed! err: %d\n", err);
+		free(efa_domain);
+		return err;
+	}
 
 	/* This list_entry is not the head of the list. But we initialize it
 	 * anyway to prevent a segfault in efa_domain_close.
@@ -194,25 +210,15 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 	efa_domain->fabric = container_of(fabric_fid, struct efa_fabric,
 					  util_fabric.fabric_fid);
 
-	err = ofi_domain_init(fabric_fid, info, &efa_domain->util_domain,
+	ret = ofi_domain_init(fabric_fid, info, &efa_domain->util_domain,
 			      context, OFI_LOCK_MUTEX);
-	if (err) {
-		ret = err;
+	if (ret)
 		goto err_free;
-	}
 
 	ofi_atomic_initialize64(&efa_domain->ibv_mr_reg_ct, 0);
 	ofi_atomic_initialize64(&efa_domain->ibv_mr_reg_sz, 0);
 
 	efa_domain->ah_map = NULL;
-
-	use_lock = ofi_thread_level(efa_domain->util_domain.threading) <= ofi_thread_level(FI_THREAD_COMPLETION);
-	err = ofi_genlock_init(&efa_domain->srx_lock, use_lock ? OFI_LOCK_MUTEX : OFI_LOCK_NOOP);
-	if (err) {
-		EFA_WARN(FI_LOG_DOMAIN, "srx lock init failed! err: %d\n", err);
-		ret = err;
-		goto err_free;
-	}
 
 	efa_domain->util_domain.av_type = FI_AV_TABLE;
 	efa_domain->util_domain.mr_map.mode |= FI_MR_VIRT_ADDR;
@@ -230,7 +236,8 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 
 	if (!info->ep_attr || info->ep_attr->type == FI_EP_UNSPEC) {
 		EFA_WARN(FI_LOG_DOMAIN, "ep type not specified when creating domain\n");
-		return -FI_EINVAL;
+		ret = -FI_EINVAL;
+		goto err_free;
 	}
 
 	efa_domain->mr_local = ofi_mr_local(info);
@@ -240,46 +247,28 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 		goto err_free;
 	}
 
-	err = efa_domain_init_device_and_pd(efa_domain, info->domain_attr->name, info->ep_attr->type);
-	if (err) {
-		ret = err;
+	ret = efa_domain_init_device_and_pd(efa_domain, info->domain_attr->name, info->ep_attr->type);
+	if (ret)
 		goto err_free;
-	}
 
 	efa_domain->info = fi_dupinfo(EFA_EP_TYPE_IS_RDM(info) ? efa_domain->device->rdm_info : efa_domain->device->dgram_info);
 	if (!efa_domain->info) {
 		ret = -FI_ENOMEM;
 		goto err_free;
 	}
+	/* keep max_cntr_value and max_err_cntr_value from user info so we can
+	 * decide whether to use hw counter later */
+	efa_domain->info->domain_attr->max_cntr_value = info->domain_attr->max_cntr_value;
+	efa_domain->info->domain_attr->max_err_cntr_value = info->domain_attr->max_err_cntr_value;
 
 	*domain_fid = &efa_domain->util_domain.domain_fid;
 
-	err = efa_domain_init_qp_table(efa_domain);
-	if (err) {
-		ret = err;
-		EFA_WARN(FI_LOG_DOMAIN, "Failed to init qp table. err: %d\n", ret);
-		goto err_free;
-	}
-
-	/*
-	 * Open the MR cache if application did not set FI_MR_LOCAL
-	 * and the cache is enabled
-	 * 
-	 * Explicit memory registrations from external application
-	 * should never go in the MR cache
+	/**
+	 * TODO: After separating efa_domain's core functionality
+	 * and efa-rdm specific functionality, we should remove
+	 * such fabric branching and assign the fields for each
+	 * fabric individually
 	 */
-	if (!efa_domain->mr_local && efa_mr_cache_enable) {
-		err = efa_mr_cache_open(&efa_domain->cache, efa_domain);
-		if (err) {
-			ret = err;
-			goto err_free;
-		}
-		efa_domain->internal_buf_mr_regv = efa_mr_cache_regv;
-	} else {
-		efa_domain->internal_buf_mr_regv = efa_mr_internal_regv;
-	}
-	efa_domain->util_domain.domain_fid.mr = &efa_domain_mr_ops;
-
 	if (EFA_INFO_TYPE_IS_RDM(info)) {
 		efa_domain->info_type = EFA_INFO_RDM;
 	} else if (EFA_INFO_TYPE_IS_DIRECT(info)) {
@@ -290,29 +279,65 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 	}
 
 	dlist_init(&efa_domain->ah_lru_list);
+	if (efa_env.track_mr)
+		dlist_init(&efa_domain->base_ep_list);
 
 	efa_domain->util_domain.domain_fid.fid.ops = &efa_ops_domain_fid;
 	if (efa_domain->info_type == EFA_INFO_RDM) {
-		err = efa_domain_init_rdm(efa_domain, info);
-		if (err) {
+		ret = efa_domain_init_rdm(efa_domain, info);
+		if (ret) {
 			EFA_WARN(FI_LOG_DOMAIN,
 				 "efa_domain_init_rdm failed. err: %d\n",
-				 -err);
+				 -ret);
 			goto err_free;
 		}
 		efa_domain->util_domain.domain_fid.ops = &efa_domain_ops_rdm;
 	} else {
 		assert(efa_domain->info_type == EFA_INFO_DIRECT || efa_domain->info_type == EFA_INFO_DGRAM);
 		efa_domain->util_domain.domain_fid.ops = &efa_domain_ops;
+		efa_domain->util_domain.domain_fid.mr = &efa_domain_mr_ops;
+		efa_domain->cache = NULL;
+
+		/* Allocate and register bounce buffer for 0-byte rma operations (efa-direct only) */
+		if (efa_domain->info_type == EFA_INFO_DIRECT && info->caps & FI_RMA) {
+			struct iovec iov;
+			struct fid_mr *mr_fid;
+			uint64_t mr_flags = FI_READ | FI_WRITE;
+
+			long page_size = ofi_get_page_size();
+			if (page_size <= 0) {
+				EFA_WARN(FI_LOG_DOMAIN, "Failed to get page size\n");
+				ret = -FI_EINVAL;
+				goto err_free;
+			}
+
+			ret = ofi_memalign(&efa_domain->zero_byte_bounce_buf, page_size, page_size);
+			if (ret) {
+				EFA_WARN(FI_LOG_DOMAIN, "Failed to allocate zero-byte bounce buffer\n");
+				goto err_free;
+			}
+
+			iov.iov_base = efa_domain->zero_byte_bounce_buf;
+			iov.iov_len = page_size;
+			ret = fi_mr_regv(&efa_domain->util_domain.domain_fid,
+						   &iov, 1, mr_flags, 0, 0, 0, &mr_fid, NULL);
+			if (ret) {
+				EFA_WARN(FI_LOG_DOMAIN, "Failed to register zero-byte bounce buffer: %d\n", ret);
+				free(efa_domain->zero_byte_bounce_buf);
+				efa_domain->zero_byte_bounce_buf = NULL;
+				goto err_free;
+			}
+			efa_domain->zero_byte_bounce_buf_mr = container_of(mr_fid, struct efa_mr, mr_fid);
+		}
 	}
 
 #ifndef _WIN32
-	err = efa_fork_support_install_fork_handler();
-	if (err) {
+	ret = efa_fork_support_install_fork_handler();
+	if (ret) {
 		EFA_WARN(FI_LOG_CORE,
 			 "Unable to install fork handler: %s\n",
-			 strerror(-err));
-		return err;
+			 strerror(-ret));
+		goto err_free;
 	}
 #endif
 
@@ -324,16 +349,14 @@ int efa_domain_open(struct fid_fabric *fabric_fid, struct fi_info *info,
 
 err_free:
 	assert(efa_domain);
-
 	err = efa_domain_close(&efa_domain->util_domain.domain_fid.fid);
 	if (err) {
 		EFA_WARN(FI_LOG_DOMAIN, "When handling error (%d), domain resource was being released. "
 			 "During the release process, an additional error (%d) was encountered\n",
 			 -ret, -err);
 	}
-
-	efa_domain = NULL;
 	*domain_fid = NULL;
+
 	return ret;
 }
 
@@ -370,6 +393,18 @@ static int efa_domain_close(fid_t fid)
 	}
 	ofi_genlock_unlock(&efa_domain->util_domain.lock);
 
+	if (efa_domain->zero_byte_bounce_buf_mr) {
+		ret = fi_close(&efa_domain->zero_byte_bounce_buf_mr->mr_fid.fid);
+		if (ret)
+			EFA_WARN(FI_LOG_DOMAIN, "Failed to close zero-byte bounce buffer MR: %d\n", ret);
+		efa_domain->zero_byte_bounce_buf_mr = NULL;
+	}
+
+	if (efa_domain->zero_byte_bounce_buf) {
+		free(efa_domain->zero_byte_bounce_buf);
+		efa_domain->zero_byte_bounce_buf = NULL;
+	}
+
 	if (efa_domain->ibv_pd) {
 		ret = ibv_dealloc_pd(efa_domain->ibv_pd);
 		if (ret)
@@ -379,20 +414,20 @@ static int efa_domain_close(fid_t fid)
 
 	ret = ofi_domain_close(&efa_domain->util_domain);
 	if (ret)
-		return ret;
+		EFA_WARN(FI_LOG_DOMAIN, "Failed to close util_domain: %d\n", ret);
 
 	if (efa_domain->shm_domain) {
 		ret = fi_close(&efa_domain->shm_domain->fid);
 		if (ret)
-			return ret;
+			EFA_WARN(FI_LOG_DOMAIN, "Failed to close shm_domain: %d\n", ret);
 	}
 
 	if (efa_domain->info)
 		fi_freeinfo(efa_domain->info);
 
 	ofi_genlock_destroy(&efa_domain->srx_lock);
-	free(efa_domain->qp_table);
 	free(efa_domain);
+
 	return 0;
 }
 
@@ -625,7 +660,7 @@ static int efa_domain_cq_open_ext(struct fid_domain *domain_fid,
 	struct efa_domain *efa_domain;
 	int err, retv;
 
-	/* GPU cannot do a blocking wait on CQ entries because 
+	/* GPU cannot do a blocking wait on CQ entries because
 	 * system FDs are only accessible to CPU. */
 	if (attr->wait_obj != FI_WAIT_NONE)
 		return -FI_ENOSYS;
@@ -649,7 +684,7 @@ static int efa_domain_cq_open_ext(struct fid_domain *domain_fid,
 	if (!cq)
 		return -FI_ENOMEM;
 
-	/* 
+	/*
 	 * CQ polling is safe when CPU virtual address is provided in buffer.
 	 * Otherwise, the memory is on GPU and the use of CQ poll interfaces should be avoided.
 	 */
@@ -716,6 +751,116 @@ static uint64_t efa_domain_get_mr_lkey(struct fid_mr *mr)
 	return efa_mr->ibv_mr->lkey;
 }
 
+#if HAVE_EFADV_CREATE_COMP_CNTR
+
+static inline int efa_domain_fi_to_efadv_memory_location(
+	const struct fi_efa_memory_location *fi_mem,
+	struct efadv_memory_location *efadv_mem)
+{
+	switch (fi_mem->type) {
+	case FI_EFA_MEMORY_LOCATION_VA:
+		if (!fi_mem->ptr) {
+			EFA_WARN(FI_LOG_CNTR,
+				 "ptr is required for VA memory location\n");
+			return -FI_EINVAL;
+		}
+		break;
+	case FI_EFA_MEMORY_LOCATION_DMABUF:
+		break;
+	default:
+		EFA_WARN(FI_LOG_CNTR, "Unknown memory location type %u\n",
+			 fi_mem->type);
+		return -FI_EINVAL;
+	}
+
+	efadv_mem->ptr = fi_mem->ptr;
+	efadv_mem->dmabuf.offset = fi_mem->dmabuf.offset;
+	efadv_mem->dmabuf.fd = fi_mem->dmabuf.fd;
+	efadv_mem->type = fi_mem->type;
+	return FI_SUCCESS;
+}
+
+static int efa_domain_cntr_open_ext(struct fid_domain *domain,
+				       struct fi_cntr_attr *attr,
+				       struct fid_cntr **cntr_fid,
+				       void *context,
+				       struct fi_efa_comp_cntr_init_attr *fi_efa_attr)
+{
+	struct efadv_comp_cntr_init_attr efa_cc_attr = {0};
+	struct efa_cntr *cntr;
+	uint32_t flags;
+	int ret;
+
+	if (!efa_env.use_hw_cntr)
+		return -FI_EOPNOTSUPP;
+
+	if (!fi_efa_attr) {
+		EFA_WARN(FI_LOG_CNTR,
+			 "fi_efa_attr is required for cntr_open_ext, "
+			 "use fi_cntr_open when no external memory is passed.\n");
+		return -FI_EINVAL;
+	}
+
+	if (fi_efa_attr->comp_mask) {
+		EFA_WARN(FI_LOG_CNTR,
+			 "Unsupported comp_mask 0x%lx in fi_efa_comp_cntr_init_attr\n",
+			 fi_efa_attr->comp_mask);
+		return -FI_EINVAL;
+	}
+
+	flags = fi_efa_attr->flags;
+
+	if (flags & FI_EFA_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM) {
+		efa_cc_attr.flags |= EFADV_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM;
+		ret = efa_domain_fi_to_efadv_memory_location(
+			&fi_efa_attr->comp_cntr_ext_mem, &efa_cc_attr.comp_cntr_ext_mem);
+		if (ret)
+			return ret;
+	}
+
+	if (flags & FI_EFA_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM) {
+		efa_cc_attr.flags |= EFADV_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM;
+		ret = efa_domain_fi_to_efadv_memory_location(
+			&fi_efa_attr->err_cntr_ext_mem, &efa_cc_attr.err_cntr_ext_mem);
+		if (ret)
+			return ret;
+	}
+
+	cntr = calloc(1, sizeof(*cntr));
+	if (!cntr)
+		return -FI_ENOMEM;
+
+	ret = efa_hw_cntr_open(domain, attr, cntr, cntr_fid, context, &efa_cc_attr);
+	if (ret) {
+		free(cntr);
+		return ret;
+	}
+
+	if (flags & FI_EFA_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM) {
+		cntr->comp_use_device_mem =
+			fi_efa_attr->comp_cntr_ext_mem.type == FI_EFA_MEMORY_LOCATION_DMABUF &&
+			!fi_efa_attr->comp_cntr_ext_mem.ptr;
+	}
+
+	if (flags & FI_EFA_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM) {
+		cntr->err_use_device_mem =
+			fi_efa_attr->err_cntr_ext_mem.type == FI_EFA_MEMORY_LOCATION_DMABUF &&
+			!fi_efa_attr->err_cntr_ext_mem.ptr;
+	}
+
+	return FI_SUCCESS;
+}
+#else
+static int efa_domain_cntr_open_ext(struct fid_domain *domain,
+				       struct fi_cntr_attr *attr,
+				       struct fid_cntr **cntr_fid,
+				       void *context,
+				       struct fi_efa_comp_cntr_init_attr *fi_efa_attr)
+{
+	return -FI_ENOSYS;
+}
+#endif /* HAVE_EFADV_CREATE_COMP_CNTR */
+
 static struct fi_efa_ops_domain efa_ops_domain = {
 	.query_mr = efa_domain_query_mr,
 };
@@ -726,6 +871,7 @@ static struct fi_efa_ops_gda efa_ops_gda = {
 	.query_cq = efa_domain_query_cq,
 	.cq_open_ext = efa_domain_cq_open_ext,
 	.get_mr_lkey = efa_domain_get_mr_lkey,
+	.cntr_open_ext = efa_domain_cntr_open_ext,
 };
 
 static int

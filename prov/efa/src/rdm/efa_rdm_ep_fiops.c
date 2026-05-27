@@ -14,7 +14,10 @@
 #include "efa_rdm_pke_req.h"
 #include "efa_rdm_pke_utils.h"
 #include "efa_cntr.h"
+#include "efa_rdm_cntr.h"
+#include "efa_rdm_mr.h"
 
+static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep);
 
 static inline
 struct efa_rdm_cq *efa_rdm_ep_get_tx_rdm_cq(struct efa_rdm_ep *ep)
@@ -39,7 +42,7 @@ int efa_rdm_pke_pool_alloc_handler(struct ofi_bufpool_region *region)
 		.iov_len = region->pool->alloc_size,
 	};
 
-	ret = domain->internal_buf_mr_regv(&domain->util_domain.domain_fid, &iov, 1, FI_SEND | FI_RECV, 0, 0, 0,
+	ret = efa_rdm_mr_cache_regv(&domain->util_domain.domain_fid, &iov, 1, FI_SEND | FI_RECV, 0, 0, 0,
 			&mr, NULL);
 
 	region->context = mr;
@@ -153,8 +156,8 @@ int efa_rdm_ep_create_buffer_pools(struct efa_rdm_ep *ep)
 	ret = efa_rdm_ep_create_pke_pool(
 		ep,
 		true, /* need memory registration */
-		efa_rdm_ep_get_tx_pool_size(ep),
-		efa_rdm_ep_get_tx_pool_size(ep), /* max count==chunk_cnt means pool is not allowed to grow */
+		efa_base_ep_get_tx_pool_size(&ep->base_ep),
+		efa_base_ep_get_tx_pool_size(&ep->base_ep), /* max count==chunk_cnt means pool is not allowed to grow */
 		EFA_RDM_BUFPOOL_ALIGNMENT,
 		tx_pkt_pool_base_flags,
 		&ep->efa_tx_pkt_pool);
@@ -168,20 +171,11 @@ int efa_rdm_ep_create_buffer_pools(struct efa_rdm_ep *ep)
 	ret = efa_rdm_ep_create_pke_pool(
 		ep,
 		true, /* need memory registration */
-		efa_rdm_ep_get_rx_pool_size(ep),
-		efa_rdm_ep_get_rx_pool_size(ep), /* max count==chunk_cnt means pool is not allowed to grow */
+		efa_base_ep_get_rx_pool_size(&ep->base_ep),
+		efa_base_ep_get_rx_pool_size(&ep->base_ep), /* max count==chunk_cnt means pool is not allowed to grow */
 		EFA_RDM_BUFPOOL_ALIGNMENT,
 		rx_pkt_pool_base_flags,
 		&ep->efa_rx_pkt_pool);
-	if (ret)
-		goto err_free;
-
-	ret = ofi_bufpool_create(&ep->user_rx_pkt_pool,
-			sizeof(struct efa_rdm_pke),
-			EFA_RDM_BUFPOOL_ALIGNMENT,
-			ep->base_ep.info->rx_attr->size,
-			ep->base_ep.info->rx_attr->size, /* max count==chunk_cnt means pool is not allowed to grow */
-			rx_pkt_pool_base_flags);
 	if (ret)
 		goto err_free;
 
@@ -219,7 +213,7 @@ int efa_rdm_ep_create_buffer_pools(struct efa_rdm_ep *ep)
 			true, /* need memory registration */
 			efa_env.readcopy_pool_size,
 			efa_env.readcopy_pool_size, /* max_cnt==chunk_cnt means pool is not allowed to grow */
-			EFA_RDM_IN_ORDER_ALIGNMENT, /* support in-order aligned send/recv */
+			EFA_RDM_EP_IN_ORDER_ALIGNMENT, /* support in-order aligned send/recv */
 			0,
 			&ep->rx_readcopy_pkt_pool);
 		if (ret)
@@ -292,6 +286,18 @@ int efa_rdm_ep_create_buffer_pools(struct efa_rdm_ep *ep)
 	if (ret)
 		goto err_free;
 
+#if ENABLE_DEBUG
+	/* Create debug info pool - one buffer per packet entry */
+	ret = ofi_bufpool_create(&ep->pke_debug_info_pool,
+				 sizeof(struct efa_rdm_pke_debug_info_buffer),
+				 EFA_RDM_BUFPOOL_ALIGNMENT,
+				 0, /* no limit to max_cnt */
+				 efa_base_ep_get_tx_pool_size(&ep->base_ep) + efa_base_ep_get_rx_pool_size(&ep->base_ep),
+				 OFI_BUFPOOL_NO_TRACK);
+	if (ret)
+		goto err_free;
+#endif
+
 	return 0;
 
 err_free:
@@ -316,9 +322,6 @@ err_free:
 	if (efa_env.rx_copy_unexp && ep->rx_unexp_pkt_pool)
 		ofi_bufpool_destroy(ep->rx_unexp_pkt_pool);
 
-	if (ep->user_rx_pkt_pool)
-		ofi_bufpool_destroy(ep->user_rx_pkt_pool);
-
 	if (ep->efa_rx_pkt_pool)
 		ofi_bufpool_destroy(ep->efa_rx_pkt_pool);
 
@@ -330,6 +333,11 @@ err_free:
 
 	if (ep->peer_robuf_pool)
 		ofi_bufpool_destroy(ep->peer_robuf_pool);
+
+#if ENABLE_DEBUG
+	if (ep->pke_debug_info_pool)
+		ofi_bufpool_destroy(ep->pke_debug_info_pool);
+#endif
 
 	return ret;
 }
@@ -408,86 +416,6 @@ static struct fi_ops efa_rdm_ep_base_ops = {
 	.control = efa_rdm_ep_ctrl,
 	.ops_open = fi_no_ops_open,
 };
-
-/**
- * @brief set the "use_zcpy_rx" flag in an EFA RDM endpoint.
- * called by efa_rdm_ep_open()
- *
- * @param[in,out] ep EFA RDM endpoint
- */
-static inline
-void efa_rdm_ep_set_use_zcpy_rx(struct efa_rdm_ep *ep)
-{
-	enum fi_hmem_iface iface;
-	uint64_t unsupported_caps = FI_DIRECTED_RECV | FI_TAGGED | FI_ATOMIC;
-
-	ep->use_zcpy_rx = true;
-
-	/* User requests to turn off zcpy recv */
-	if (!efa_env.use_zcpy_rx) {
-		EFA_INFO(FI_LOG_EP_CTRL, "User disables zero-copy receive protocol via environment\n");
-		ep->use_zcpy_rx = false;
-		goto out;
-	}
-
-	/* Unsupported capabilities */
-	if (ep->base_ep.util_ep.caps & unsupported_caps) {
-		EFA_INFO(FI_LOG_EP_CTRL, "Unsupported capabilities, zero-copy receive protocol will be disabled\n");
-		ep->use_zcpy_rx = false;
-		goto out;
-	}
-
-	/* Max msg size is too large, turn off zcpy recv */
-	if (ep->base_ep.max_msg_size > ep->mtu_size - ep->base_ep.info->ep_attr->msg_prefix_size) {
-		EFA_INFO(FI_LOG_EP_CTRL,
-			 "max_msg_size (%zu) is greater than the mtu size limit: %zu. "
-			 "Zero-copy receive protocol will be disabled.\n",
-			 ep->base_ep.max_msg_size,
-			 ep->mtu_size - ep->base_ep.info->ep_attr->msg_prefix_size);
-		ep->use_zcpy_rx = false;
-		goto out;
-	}
-
-	/* If app needs sas ordering, turn off zcpy recv */
-	if (efa_rdm_ep_need_sas(ep)) {
-		EFA_INFO(FI_LOG_EP_CTRL, "FI_ORDER_SAS is requested, zero-copy receive protocol will be disabled\n");
-		ep->use_zcpy_rx = false;
-		goto out;
-	}
-
-	/* FI_MR_LOCAL is not set, turn off zcpy recv */
-	if (!ep->base_ep.domain->mr_local) {
-		EFA_INFO(FI_LOG_EP_CTRL, "FI_MR_LOCAL mode bit is not set, zero-copy receive protocol will be disabled\n");
-		ep->use_zcpy_rx = false;
-		goto out;
-	}
-
-	if (ep->shm_ep) {
-		EFA_INFO(FI_LOG_EP_CTRL, "Libfabric SHM is not turned off, zero-copy receive protocol will be disabled\n");
-		ep->use_zcpy_rx = false;
-		goto out;
-	}
-
-	/* Zero-copy receive requires P2P support. Disable it if any initialized HMEM iface does not support P2P. */
-	EFA_HMEM_IFACE_FOREACH_NON_SYSTEM(iface) {
-		if (g_efa_hmem_info[iface].initialized &&
-		    (ofi_hmem_p2p_disabled() ||
-		    ep->hmem_p2p_opt == FI_HMEM_P2P_DISABLED ||
-		    !g_efa_hmem_info[iface].p2p_supported_by_device)) {
-			EFA_INFO(FI_LOG_EP_CTRL,
-			         "%s does not support P2P, zero-copy receive "
-			         "protocol will be disabled\n",
-			         fi_tostr(&iface, FI_TYPE_HMEM_IFACE));
-			ep->use_zcpy_rx = false;
-			goto out;
-		}
-	}
-
-out:
-	EFA_INFO(FI_LOG_EP_CTRL, "efa_rdm_ep->use_zcpy_rx = %d\n",
-		 ep->use_zcpy_rx);
-	return;
-}
 
 /**
  * @brief progress engine for the EFA RDM endpoint
@@ -645,12 +573,32 @@ int efa_rdm_ep_open(struct fid_domain *domain, struct fi_info *info,
 	efa_rdm_ep->write_in_order_aligned_128_bytes = false;
 	efa_rdm_ep->homogeneous_peers = false;
 
-	efa_rdm_ep->pke_vec = calloc(sizeof(struct efa_rdm_pke *), EFA_RDM_EP_MAX_WR_PER_IBV_POST_RECV);
+	efa_rdm_ep->pke_vec = calloc(sizeof(struct efa_rdm_pke *), efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep));
 	if (!efa_rdm_ep->pke_vec) {
 		EFA_WARN(FI_LOG_EP_CTRL, "cannot alloc memory for efa_rdm_ep->pke_vec!\n");
 		ret = -FI_ENOMEM;
-		goto err_close_shm_ep;
+		goto err_destroy_buffer_pools;
 	}
+
+	efa_rdm_ep->send_pkt_entry_vec = calloc(sizeof(struct efa_rdm_pke *), efa_base_ep_get_tx_pool_size(&efa_rdm_ep->base_ep));
+	if (!efa_rdm_ep->send_pkt_entry_vec) {
+		EFA_WARN(FI_LOG_EP_CTRL, "cannot alloc memory for efa_rdm_ep->send_pkt_entry_vec!\n");
+		ret = -FI_ENOMEM;
+		goto err_free_pke_vec;
+	}
+
+	efa_rdm_ep->send_pkt_entry_vec_data_sizes =
+		calloc(sizeof(size_t),
+		       efa_base_ep_get_tx_pool_size(&efa_rdm_ep->base_ep));
+	if (!efa_rdm_ep->send_pkt_entry_vec_data_sizes) {
+		EFA_WARN(FI_LOG_EP_CTRL,
+			 "cannot alloc memory for "
+			 "efa_rdm_ep->send_pkt_entry_vec_data_sizes!\n");
+		ret = -FI_ENOMEM;
+		goto err_free_send_pkt_entry_vec;
+	}
+
+	dlist_init(&efa_rdm_ep->ep_peer_list);
 
 	dlist_init(&efa_rdm_ep->ep_peer_list);
 
@@ -664,6 +612,12 @@ int efa_rdm_ep_open(struct fid_domain *domain, struct fi_info *info,
 	(*ep)->cm = &efa_rdm_ep_cm_ops;
 	return 0;
 
+err_free_send_pkt_entry_vec:
+	free(efa_rdm_ep->send_pkt_entry_vec);
+err_free_pke_vec:
+	free(efa_rdm_ep->pke_vec);
+err_destroy_buffer_pools:
+	efa_rdm_ep_destroy_buffer_pools(efa_rdm_ep);
 err_close_shm_ep:
 	if (efa_rdm_ep->shm_ep) {
 		retv = fi_close(&efa_rdm_ep->shm_ep->fid);
@@ -693,7 +647,7 @@ static int efa_rdm_ep_bind(struct fid *ep_fid, struct fid *bfid, uint64_t flags)
 		container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	struct efa_rdm_cq *cq;
 	struct efa_av *av;
-	struct efa_cntr *cntr;
+	struct efa_rdm_cntr *cntr;
 	struct util_eq *eq;
 	int ret = 0;
 
@@ -732,9 +686,9 @@ static int efa_rdm_ep_bind(struct fid *ep_fid, struct fid *bfid, uint64_t flags)
 		}
 		break;
 	case FI_CLASS_CNTR:
-		cntr = container_of(bfid, struct efa_cntr, util_cntr.cntr_fid.fid);
+		cntr = container_of(bfid, struct efa_rdm_cntr, efa_cntr.util_cntr.cntr_fid.fid);
 
-		ret = ofi_ep_bind_cntr(&efa_rdm_ep->base_ep.util_ep, &cntr->util_cntr, flags);
+		ret = ofi_ep_bind_cntr(&efa_rdm_ep->base_ep.util_ep, &cntr->efa_cntr.util_cntr, flags);
 		if (ret)
 			return ret;
 
@@ -771,9 +725,26 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 	struct efa_rdm_ope *rxe;
 	struct efa_rdm_ope *txe;
 	struct efa_rdm_peer *peer;
+	struct efa_rdm_peer_overflow_pke_list_entry *overflow_pke_list_entry;
 	struct util_av_entry *util_av_entry;
 	struct efa_av_entry *av_entry;
 	struct efa_conn_ep_peer_map_entry *peer_map_entry;
+
+	/*
+	 * Overflow pkes sit on both peer->overflow_pke_list and (in debug mode) rx_pkt_list.
+	 * Release them before: rx_pkt_list debug sweep & efa_rdm_peer_destruct to avoid a double-free.
+	 */
+	dlist_foreach_container(&efa_rdm_ep->ep_peer_list,
+				struct efa_rdm_peer, peer,
+				ep_peer_list_entry) {
+		dlist_foreach_container_safe(&peer->overflow_pke_list,
+					     struct efa_rdm_peer_overflow_pke_list_entry,
+					     overflow_pke_list_entry, entry, tmp) {
+			dlist_remove(&overflow_pke_list_entry->entry);
+			efa_rdm_pke_release_rx_list(overflow_pke_list_entry->pkt_entry);
+			ofi_buf_free(overflow_pke_list_entry);
+		}
+	}
 
 #if ENABLE_DEBUG
 	struct efa_rdm_pke *pkt_entry;
@@ -872,9 +843,6 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 	if (efa_rdm_ep->rx_unexp_pkt_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->rx_unexp_pkt_pool);
 
-	if (efa_rdm_ep->user_rx_pkt_pool)
-		ofi_bufpool_destroy(efa_rdm_ep->user_rx_pkt_pool);
-
 	if (efa_rdm_ep->efa_rx_pkt_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->efa_rx_pkt_pool);
 
@@ -889,6 +857,11 @@ static void efa_rdm_ep_destroy_buffer_pools(struct efa_rdm_ep *efa_rdm_ep)
 
 	if (efa_rdm_ep->peer_robuf_pool)
 		ofi_bufpool_destroy(efa_rdm_ep->peer_robuf_pool);
+
+#if ENABLE_DEBUG
+	if (efa_rdm_ep->pke_debug_info_pool)
+		ofi_bufpool_destroy(efa_rdm_ep->pke_debug_info_pool);
+#endif
 }
 
 /**
@@ -1005,13 +978,13 @@ void efa_rdm_ep_deregister_ibv_cqs(struct efa_rdm_ep *ep)
 	if (tx_cq && !ofi_atomic_get32(&tx_cq->efa_cq.util_cq.ref)) {
 		efa_ibv_cq_poll_list_remove(&tx_cq->ibv_cq_poll_list, &tx_cq->efa_cq.util_cq.ep_list_lock, &tx_cq->efa_cq.ibv_cq);
 		efa_rdm_cq_wait_del_ibv_cq(tx_cq, &tx_cq->efa_cq.ibv_cq);
-		if (rx_cq) {
+		if (rx_cq && rx_cq != tx_cq) {
 			efa_ibv_cq_poll_list_remove(&rx_cq->ibv_cq_poll_list, &rx_cq->efa_cq.util_cq.ep_list_lock, &tx_cq->efa_cq.ibv_cq);
 			efa_rdm_cq_wait_del_ibv_cq(rx_cq, &tx_cq->efa_cq.ibv_cq);
 		}
 	}
 
-	if (rx_cq && !ofi_atomic_get32(&rx_cq->efa_cq.util_cq.ref)) {
+	if (rx_cq && rx_cq != tx_cq && !ofi_atomic_get32(&rx_cq->efa_cq.util_cq.ref)) {
 		efa_ibv_cq_poll_list_remove(&rx_cq->ibv_cq_poll_list, &rx_cq->efa_cq.util_cq.ep_list_lock, &rx_cq->efa_cq.ibv_cq);
 		efa_rdm_cq_wait_del_ibv_cq(rx_cq, &rx_cq->efa_cq.ibv_cq);
 		if (tx_cq) {
@@ -1110,6 +1083,10 @@ static int efa_rdm_ep_close(struct fid *fid)
 	 * The QP destroy and op entries clean up must be in the same lock,
 	 * otherwise there can be race condition that efa_domain_progress_rdm_peers_and_queues
 	 * (part of fi_cq_read) can access entries that are from a closed QP.
+	 *
+	 * Destroying the self AH also requires the SRX lock
+	 * Destroying the self AH modifies the AH refcnts which can also
+	 * modified in the CQ read path by implicit-to-explicit AV entry conversion
 	 */
 	ofi_genlock_lock(&domain->srx_lock);
 
@@ -1117,7 +1094,10 @@ static int efa_rdm_ep_close(struct fid *fid)
 	 * with other threads progressing the cq. */
 	efa_base_ep_close_util_ep(&efa_rdm_ep->base_ep);
 
-	efa_base_ep_remove_cntr_ibv_cq_poll_list(&efa_rdm_ep->base_ep);
+	efa_rdm_ep_remove_cntr_ibv_cq_poll_list(&efa_rdm_ep->base_ep);
+
+	if (efa_rdm_ep->self_ah)
+		efa_ah_release(efa_rdm_ep->base_ep.domain, efa_rdm_ep->self_ah, false);
 
 	efa_rdm_ep_deregister_ibv_cqs(efa_rdm_ep);
 
@@ -1135,6 +1115,10 @@ static int efa_rdm_ep_close(struct fid *fid)
 
 	if (efa_rdm_ep->pke_vec)
 		free(efa_rdm_ep->pke_vec);
+	if (efa_rdm_ep->send_pkt_entry_vec)
+		free(efa_rdm_ep->send_pkt_entry_vec);
+	if (efa_rdm_ep->send_pkt_entry_vec_data_sizes)
+		free(efa_rdm_ep->send_pkt_entry_vec_data_sizes);
 
 	ofi_genlock_unlock(&domain->srx_lock);
 
@@ -1169,20 +1153,37 @@ void efa_rdm_ep_set_extra_info(struct efa_rdm_ep *ep)
 	if (ep->base_ep.qp->unsolicited_write_recv_enabled)
 		ep->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_UNSOLICITED_WRITE_RECV;
 
-	if (ep->use_zcpy_rx) {
-		/*
-		 * When zcpy rx is enabled, an extra QP is created to
-		 * post rx pkts from user recv buffer directly.
-		 */
-		ep->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP;
-	}
-
 	ep->extra_info[0] |= EFA_RDM_EXTRA_REQUEST_CONNID_HEADER;
 
 	ep->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_RUNT;
 
 	/* READ_NACK feature introduced in libfabric 1.20 */
 	ep->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_READ_NACK;
+
+	/*
+	 * For backwards compatibility with older peers that may have zero-copy
+	 * receive enabled: evaluate whether an old peer with the same
+	 * configuration would have use_zcpy_rx=1. If so, we must enforce
+	 * handshake before sending to discover the peer's capabilities.
+	 *
+	 * Note that old peers evaluate their own attributes and unilaterally
+	 * decide to use the zero-copy mode. And an old peer that has decided
+	 * to use zero-copy mode will reject data packets sent to it's control
+	 * QP. The handshake is necessary to determine if the old peer has
+	 * fallen into the zero-copy mode and to retrieve the old peer's user
+	 * recv QP information.
+	 *
+	 * Note: we do NOT set EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP in
+	 * extra_info because we don't have a user_recv_qp. Setting it would
+	 * cause old peers to send zero-copy packets to us, which we can't handle.
+	 */
+	ep->peer_may_have_zcpy_rx =
+		efa_env.use_zcpy_rx &&
+		!(ep->base_ep.util_ep.caps & (FI_DIRECTED_RECV | FI_TAGGED | FI_ATOMIC)) &&
+		ep->base_ep.max_msg_size <= ep->mtu_size - ep->base_ep.info->ep_attr->msg_prefix_size &&
+		!efa_rdm_ep_need_sas(ep) &&
+		ep->base_ep.domain->mr_local &&
+		!ep->shm_ep;
 }
 
 /**
@@ -1359,6 +1360,20 @@ int efa_rdm_ep_register_ibv_cqs(struct efa_rdm_ep *ep)
 	return FI_SUCCESS;
 }
 
+/* efa_rdm_ep_create_self_ah() create an address handler for
+ * an EP's own address. The address handler is used by
+ * an EP to read from itself. It is used to
+ * copy data from host memory to GPU memory.
+ */
+static inline
+int efa_rdm_ep_create_self_ah(struct efa_rdm_ep *rdm_ep)
+{
+
+	rdm_ep->self_ah = efa_ah_alloc(rdm_ep->base_ep.domain, rdm_ep->base_ep.src_addr.raw, false);
+
+	return rdm_ep->self_ah ? 0 : -FI_EINVAL;
+}
+
 /**
  * @brief implement the fi_enable() API for EFA RDM endpoint
  * @param[in,out]	fid	Endpoint to enable
@@ -1374,7 +1389,6 @@ static int efa_rdm_ep_ctrl(struct fid *fid, int command, void *arg)
 	struct fi_peer_srx_context peer_srx_context = {0};
 	struct fi_rx_attr peer_srx_attr = {0};
 	struct util_srx_ctx *srx_ctx;
-	bool create_user_recv_qp = false;
 
 	switch (command) {
 	case FI_ENABLE:
@@ -1390,33 +1404,29 @@ static int efa_rdm_ep_ctrl(struct fid *fid, int command, void *arg)
 
 		efa_rdm_ep_update_shm(ep);
 
-		efa_rdm_ep_set_use_zcpy_rx(ep);
-
-		/* In zero-copy mode, update inject_size to the size of the inline data
-		 * buffer of the NIC, unless the user already requested a smaller size
-		 *
-		 * TODO: Distinguish between inline data sizes for RDMA {send,write}
-		 * when supported
-		 */
-		if (ep->use_zcpy_rx) {
-			ep->base_ep.inject_msg_size =
-				MIN(ep->base_ep.inject_msg_size,
-				    efa_rdm_ep_domain(ep)->device->efa_attr.inline_buf_size);
-			ep->base_ep.inject_rma_size =
-				MIN(ep->base_ep.inject_rma_size,
-				    efa_rdm_ep_domain(ep)->device->efa_attr.inline_buf_size);
-			create_user_recv_qp = true;
-		}
-
-		ret = efa_base_ep_create_and_enable_qp(&ep->base_ep, create_user_recv_qp);
+		ret = efa_base_ep_create_and_enable_qp(&ep->base_ep);
 		if (ret)
 			return ret;
+
+		/* Acquire the SRX lock before creating self AH
+		 * Creating the self AH modifies the AH refcnts which can also
+		 * modified in the CQ read path by implicit-to-explicit AV entry
+		 * conversion */
+		ofi_genlock_lock(&ep->base_ep.domain->srx_lock);
+		ret = efa_rdm_ep_create_self_ah(ep);
+		ofi_genlock_unlock(&ep->base_ep.domain->srx_lock);
+		if (ret) {
+			EFA_WARN(FI_LOG_EP_CTRL,
+			 "EFA RDM endpoint cannot create ah for its own address\n");
+			efa_base_ep_destruct_qp(&ep->base_ep);
+			return ret;
+		}
 
 		ret = efa_rdm_ep_register_ibv_cqs(ep);
 		if (ret)
 			goto err_destroy_qp;
 
-		ret = efa_base_ep_insert_cntr_ibv_cq_poll_list(&ep->base_ep);
+		ret = efa_rdm_ep_insert_cntr_ibv_cq_poll_list(&ep->base_ep);
 		if (ret)
 			goto err_destroy_qp;
 
@@ -1498,11 +1508,6 @@ ssize_t efa_rdm_ep_cancel(fid_t fid_ep, void *context)
 	struct efa_rdm_ep *ep;
 
 	ep = container_of(fid_ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
-	if (ep->use_zcpy_rx) {
-		EFA_WARN(FI_LOG_EP_CTRL, "fi_cancel is not supported in zero-copy receive mode.\n");
-		return -FI_EOPNOTSUPP;
-	}
-
 	return ep->peer_srx_ep->ops->cancel(&ep->peer_srx_ep->fid, context);
 }
 

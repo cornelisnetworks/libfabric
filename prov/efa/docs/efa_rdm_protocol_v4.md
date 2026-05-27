@@ -323,13 +323,13 @@ Table: 2.1 a list of extra features/requests
 | ID | Name              |  Type    | Introduced since | Described in |
 |---|---|---|---|---|
 | 0  | RDMA-Read based data transfer    | extra feature | libfabric 1.10.0 | Section 4.1 |
-| 1  | delivery complete                | extra feature | libfabric 1.12.0 | Section 4.2 |
+| 1  | delivery complete                | extra feature | libfabric 1.12.0 | Section 4.2 _(baseline since 2.6)_ |
 | 2  | keep packet header length constant | extra request | libfabric 1.13.0 | Section 4.3 |
-| 3  | sender connection id in packet header  | extra request | libfabric 1.14.0 | Section 4.4 |
-| 4  | runting read message protocol    | extra feature | libfabric 1.16.0 | Section 4.5 |
+| 3  | sender connection id in packet header  | extra request | libfabric 1.14.0 | Section 4.4 _(baseline since 2.6)_ |
+| 4  | runting read message protocol    | extra feature | libfabric 1.16.0 | Section 4.5 _(baseline since 2.6)_ |
 | 5  | RDMA-Write based data transfer   | extra feature | libfabric 1.18.0 | Section 4.6 |
-| 6  | Read nack packets                | extra feature | libfabric 1.20.0 | Section 4.7 |
-| 7  | User recv QP            | extra feature & request| libfabric 1.22.0 | Section 4.8 |
+| 6  | Read nack packets                | extra feature | libfabric 1.20.0 | Section 4.7 _(baseline since 2.6)_ |
+| 7  | User recv QP            | extra feature & request| libfabric 1.22.0 | _(legacy, see Section 4.8)_ |
 | 8  | Unsolicited write recv  | extra feature | libfabric 1.22.0 | Section 4.9 |
 
 How does protocol v4 maintain backward compatibility when extra features/requests are introduced?
@@ -379,6 +379,40 @@ If receiver is in zero copy receive mode, it will have the extra request
 for sender to ignore the request, and send packets with different header length.
 It is receiver's responsibility to react accordingly. (section 4.3)
 
+#### Baseline promotion of extra features and requests (libfabric 2.6+)
+
+Starting with libfabric 2.6, backwards compatibility is only guaranteed to libfabric 2.0.
+Any extra feature or request that was introduced before libfabric 2.0 is considered to be
+universally supported by all peers, since every supported peer (v2.0+) already implements it.
+
+When an extra feature is promoted to baseline (marked as _(baseline since X.Y)_ in table 2.1),
+the following applies:
+
+- The flag is still set in `extra_info` during the handshake, because v2.0 peers check for
+  it and would reject operations if the flag is missing.
+- However, the local endpoint no longer checks the peer's `extra_info` for that flag and
+  assumes the peer always supports the feature. A handshake is no longer required before
+  using the feature.
+
+As of libfabric 2.6, the following features/requests has been baselined:
+
+- **Delivery complete (ID 1)**: Baseline since 2.6. The handshake requirement for DC packets
+  has been removed from the send, write, and atomic paths. See section 4.2.
+
+- **Connid header (ID 3)**: Baseline since 2.6. The endpoint always includes connid in
+  packet headers after handshake without checking the peer's `extra_info`. See section 4.4.
+
+- **Runt protocol (ID 4)**: Baseline since 2.6. The handshake requirement for RUNTCTS
+  packets has been removed. RUNTREAD packets still require a handshake for RDMA read
+  hardware verification. See section 4.5.
+
+- **Read nack (ID 6)**: Baseline since 2.6. READ_NACK packets can always be sent without
+  checking the peer's handshake status. See section 4.7.
+
+The remaining extra features (RDMA read, RDMA write, unsolicited write recv) depend on
+peer hardware capabilities and cannot be baselined — a handshake is still required to
+verify the peer's device supports them.
+
 This concludes the workflow of the handshake subprotocol.
 
 The binary format of a HANDSHAKE packet is listed in table 2.2.
@@ -397,8 +431,8 @@ Table: 2.2 binary format of the HANDSHAKE packet
 | `host_id`        | 8                     | integer       | `uint64_t`   | `HANDSHAKE_HOST_ID_HDR`        |
 | `device_version` | 4                     | integer       | `uint32_t`   | `HANDSHAKE_DEVICE_VERSION_HDR` |
 | _reserved_       | 4                     | _N/A_         | _N/A_        | `HANDSHAKE_DEVICE_VERSION_HDR` |
-| `qpn`            | 4                     | integer       | `uint32_t`   | `HANDSHAKE_USER_RECV_QP_HDR`   |
-| `qkey`           | 4                     | integer       | `uint32_t`   | `HANDSHAKE_USER_RECV_QP_HDR`   |
+| `qpn`            | 4                     | integer       | `uint32_t`   | `HANDSHAKE_USER_RECV_QP_HDR` _(legacy, see Section 4.8)_ |
+| `qkey`           | 4                     | integer       | `uint32_t`   | `HANDSHAKE_USER_RECV_QP_HDR` _(legacy, see Section 4.8)_ |
 
 The first 4 bytes (3 fields: `type`, `version`, `flags`) is the EFA RDM base header (section 1.3).
 
@@ -446,7 +480,7 @@ HANDSHAKE packet's header (table 2.3).
 - `connid` is a universal field explained in detail in section 4.4.
 - `host_id` is an unsigned integer representing the host identifier of the sender.
 - `device_version` represents the version of the sender's EFA device.
-- `qpn` and `qkey` represent the QP number of the user receive QP, explained in detail in section 4.8.
+- `qpn` and `qkey` represent the QP number of the user receive QP, explained in detail in section 4.8. (No longer generated by new endpoints since libfabric 2.6, but must still be parsed for backwards compatibility.)
 
 Table 2.3 Flags for optional HANDSHAKE packet fields
 
@@ -455,7 +489,7 @@ Table 2.3 Flags for optional HANDSHAKE packet fields
 | `CONNID_HDR`                   | $2^{15}$ | `0x8000` | `connid`         |
 | `HANDSHAKE_HOST_ID_HDR`        | $2^0$    | `0x0001` | `host_id`        |
 | `HANDSHAKE_DEVICE_VERSION_HDR` | $2^1$    | `0x0002` | `device_version` |
-| `HANDSHAKE_USER_RECV_QP_HDR`   | $2^2$    | `0x0004` | `qpn` and `qkey` |
+| `HANDSHAKE_USER_RECV_QP_HDR`   | $2^2$    | `0x0004` | `qpn` and `qkey` _(legacy, see Section 4.8)_ |
 
 Refer to table 2.2 for field attributes, such as corresponding C data
 types and length in bytes (including padding).
@@ -466,6 +500,8 @@ field is missing (flag is unset), its space will _not_ be reserved in the
 HANDSHAKE packet header. For example, if a HANDSHAKE packet should contain only
 the `host_id`, it would directly follow `extra_info` (no empty space left for
 `connid`).
+
+`HANDSHAKE_USER_RECV_QP_HDR` is no longer used since Libfabric 2.6. It is retained in the protocol for backwards compatibility. See Section 4.8.
 
 ### 2.2 Handshake subprotocol and raw address exchange
 
@@ -1287,6 +1323,11 @@ not necessary for the responder to keep the progress engine running.
 
 ### 4.2 Delivery complete
 
+**Since libfabric 2.6, delivery complete is treated as a baseline feature. All supported
+peers (v2.0+) support it, so a handshake is no longer required before sending DC packets.
+The `EFA_RDM_EXTRA_FEATURE_DELIVERY_COMPLETE` flag is still advertised in `extra_info`
+for backwards compatibility with v2.0 peers that check for it.**
+
 The extra feature "delivery complete" was introduced with libfabric 1.12.0 and was assigned ID 1.
 
 Delivery complete is a requirement the application can impose on an endpoint when opening the endpoint.
@@ -1351,7 +1392,8 @@ for more information about the field `connid`.
 
 ### 4.3 Keep packet header length constant (constant header length) and zero-copy receive
 
-**This mode bit is deprecated since libfabric 1.22.0 and replaced by the "user recv qp" feature/request (See 4.8)**
+**This mode bit is deprecated since libfabric 1.22.0 and replaced by the "user recv qp" feature/request (See 4.8).
+The "user recv qp" feature is itself no longer used by new endpoints since libfabric 2.6 (See 4.8).**
 
 The extra request "keep packet header length constant" (constant header length) was introduced in the libfabric 1.13.0
 release and was assigned the ID 2.
@@ -1416,6 +1458,12 @@ This re-interpretation does not change the implementation, and thus, it does not
 
 ### 4.4 Have connection ID in packet header (connid header)
 
+**Since libfabric 2.6, the connid header request is treated as a baseline request. All supported
+peers (v2.0+) request it, so the local endpoint always includes connid in packet headers after
+handshake without checking the peer's `extra_info`. The `EFA_RDM_EXTRA_REQUEST_CONNID_HEADER`
+flag is still advertised in `extra_info` for backwards compatibility with v2.0 peers that
+check for it.**
+
 The "have connection ID in packet header" extra request was introduced with the libfabric 1.14.0 release and was
 assigned the ID 3.
 
@@ -1451,6 +1499,12 @@ the CONNID_HDR flag in the `flags` field of the base header. The exact location 
 each packet type.
 
 ### 4.5 Runting read message subprotocol
+
+**Since libfabric 2.6, the runt protocol is treated as a baseline feature. All supported
+peers (v2.0+) support it, so a handshake is no longer required before sending runt packets.
+The `EFA_RDM_EXTRA_FEATURE_RUNT` flag is still advertised in `extra_info` for backwards
+compatibility with v2.0 peers that check for it. Note that RUNTREAD packets still require
+a handshake to verify RDMA read hardware support.**
 
 The "runting read message protocol support" extra feature was introduced with the libfabric 1.16.0 release (together with the runting read message subprotocol) and was assigned the ID 4.
 
@@ -1512,6 +1566,11 @@ in order to support CQ entry generation in case the sender uses
 
 ### 4.7 Long read and runting read nack protocol
 
+**Since libfabric 2.6, the read nack protocol is treated as a baseline feature. All supported
+peers (v2.0+) support it, so a READ_NACK packet can always be sent without checking the
+peer's handshake status or `extra_info`. The `EFA_RDM_EXTRA_FEATURE_READ_NACK` flag is still
+advertised in `extra_info` for backwards compatibility with v2.0 peers that check for it.**
+
 Long read and runting read protocols in Libfabric 1.20 and above use a nack protocol
 when the receiver is unable to register a memory region for the RDMA read operation 
 or P2P support is unavailable for the RDMA read operation, typically because of a 
@@ -1557,6 +1616,14 @@ The workflow for runting read protocol is shown below
 ![long-read fallback](message_runtread_fallback.png)
 
 ### 4.8 User receive QP feature & request and zero-copy receive
+
+**The zero-copy receive path and user receive QP are no longer used by new endpoints
+since libfabric 2.6. New endpoints do not create a user receive QP or enable zero-copy
+receive locally. However, the send-side support is retained for backwards compatibility:
+new endpoints will still send headerless packets to an old peer's user receive QP if the
+peer advertises this feature in its handshake. The `HANDSHAKE_USER_RECV_QP_HDR` optional
+header and `EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP` extra feature flag remain part
+of the protocol and must still be parsed by all implementations.**
 
 The extra feature/request "user recv(receive) qp" was introduced in the libfabric 1.22.0
 release and was assigned the ID 7. It is used if an endpoint wants to implement the "zero copy receive" optimization.

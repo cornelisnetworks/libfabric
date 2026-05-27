@@ -19,6 +19,7 @@
 #include <rdma/fi_errno.h>
 #include <infiniband/verbs.h>
 
+#include "ofi_util.h"
 #include "efa.h"
 #include "efa_device.h"
 #include "efa_prov_info.h"
@@ -97,6 +98,58 @@ err_close:
 }
 
 /**
+ * @brief set the max completion counter value from the device
+ *
+ * @param	efa_device[in]	pointer to a struct efa_device
+ * @return	max_comp_cntr value from device, or 0 if unavailable
+ */
+static void efa_device_set_max_comp_cntr(struct efa_device *efa_device)
+{
+	efa_device->max_comp_cntr = 0;
+#if HAVE_IBV_DEVICE_ATTR_EX_MAX_COMP_CNTR
+	struct ibv_device_attr_ex attr_ex = {0};
+	struct ibv_query_device_ex_input input = {0};
+	int err;
+
+	err = ibv_query_device_ex(efa_device->ibv_ctx, &input, &attr_ex);
+	if (err) {
+		EFA_WARN_ERRNO(FI_LOG_FABRIC, "ibv_query_device_ex failed", err);
+		return;
+	}
+	efa_device->max_comp_cntr = attr_ex.max_comp_cntr;
+#endif
+}
+
+/**
+ * @brief set the max comp/err count values from the device
+ *
+ * @param	efa_device[in,out]	pointer to a struct efa_device
+ */
+static void efa_device_set_cntr_max_values(struct efa_device *efa_device)
+{
+	efa_device->comp_count_max_value = 0;
+	efa_device->err_count_max_value = 0;
+#if HAVE_IBV_CREATE_COMP_CNTR
+	{
+		struct ibv_comp_cntr_init_attr cc_attr = {0};
+		struct ibv_comp_cntr *comp_cntr;
+		int err;
+
+		comp_cntr = ibv_create_comp_cntr(efa_device->ibv_ctx, &cc_attr);
+		if (!comp_cntr) {
+			EFA_WARN_ERRNO(FI_LOG_CNTR, "ibv_create_comp_cntr failed.", errno);
+		} else {
+			efa_device->comp_count_max_value = comp_cntr->comp_count_max_value;
+			efa_device->err_count_max_value = comp_cntr->err_count_max_value;
+			err = ibv_destroy_comp_cntr(comp_cntr);
+			if (err)
+				EFA_WARN_ERRNO(FI_LOG_CNTR, "ibv_destroy_comp_cntr failed", err);
+		}
+	}
+#endif
+}
+
+/**
  * @brief initialize data members of a struct of efa_device after the gid
  * including the prov info
  *
@@ -110,8 +163,24 @@ int efa_device_construct_data(struct efa_device *efa_device,
 			 struct ibv_device *ibv_device)
 {
 	int err;
+	size_t qp_table_size;
 
 	assert(efa_device->ibv_ctx);
+
+	/* Initialize QP table */
+	efa_device->qp_table = NULL;
+	qp_table_size = roundup_power_of_two(efa_device->ibv_attr.max_qp);
+	efa_device->qp_table_sz_m1 = qp_table_size - 1;
+	efa_device->qp_table = calloc(qp_table_size, sizeof(*efa_device->qp_table));
+	if (!efa_device->qp_table) {
+		err = -FI_ENOMEM;
+		goto err_close;
+	}
+	efa_device->qp_gen_table = calloc(qp_table_size, sizeof(*efa_device->qp_gen_table));
+	if (!efa_device->qp_gen_table) {
+		err = -FI_ENOMEM;
+		goto err_close;
+	}
 
 #if HAVE_RDMA_SIZE
 	efa_device->max_rdma_size = efa_device->efa_attr.max_rdma_size;
@@ -120,6 +189,8 @@ int efa_device_construct_data(struct efa_device *efa_device,
 	efa_device->max_rdma_size = 0;
 	efa_device->device_caps = 0;
 #endif
+	efa_device_set_max_comp_cntr(efa_device);
+	efa_device_set_cntr_max_values(efa_device);
 	efa_device->rdm_info = NULL;
 	err = efa_prov_info_alloc(&efa_device->rdm_info, efa_device, FI_EP_RDM);
 	if (err) {
@@ -136,9 +207,23 @@ int efa_device_construct_data(struct efa_device *efa_device,
 		goto err_close;
 	}
 
+	/* Initialize QP table lock */
+	err = ofi_genlock_init(&efa_device->qp_table_lock, OFI_LOCK_MUTEX);
+	if (err)
+		goto err_close;
+
 	return 0;
 
 err_close:
+	if (efa_device->qp_table) {
+		free(efa_device->qp_table);
+		efa_device->qp_table = NULL;
+	}
+	if (efa_device->qp_gen_table) {
+		free(efa_device->qp_gen_table);
+		efa_device->qp_gen_table = NULL;
+	}
+
 	EFA_INFO(FI_LOG_CORE, "Close ibv device for ibv_ctx %p\n", efa_device->ibv_ctx);
 	ibv_close_device(efa_device->ibv_ctx);
 	efa_device->ibv_ctx = NULL;
@@ -161,9 +246,18 @@ err_close:
  *
  * @param	device[in,out]		pointer to an efa_device struct
  */
-static void efa_device_destruct(struct efa_device *device)
+void efa_device_destruct(struct efa_device *device)
 {
 	int err;
+
+	if (device->qp_table) {
+		free(device->qp_table);
+		device->qp_table = NULL;
+	}
+	if (device->qp_gen_table) {
+		free(device->qp_gen_table);
+		device->qp_gen_table = NULL;
+	}
 
 	if (device->ibv_ctx) {
 		EFA_INFO(FI_LOG_CORE, "Close ibv device for ibv_ctx %p\n", device->ibv_ctx);
@@ -174,6 +268,16 @@ static void efa_device_destruct(struct efa_device *device)
 	}
 
 	device->ibv_ctx = NULL;
+
+	if (device->rdm_info) {
+		fi_freeinfo(device->rdm_info);
+		device->rdm_info = NULL;
+	}
+
+	if (device->dgram_info) {
+		fi_freeinfo(device->dgram_info);
+		device->dgram_info = NULL;
+	}
 }
 
 /*
@@ -284,6 +388,9 @@ int efa_device_list_initialize(void)
 		}
 
 		memcpy(&g_efa_selected_device_list[g_efa_selected_device_cnt], &cur_device, sizeof(struct efa_device));
+#ifndef _WIN32
+		g_efa_selected_device_list[g_efa_selected_device_cnt].urandom_fd = open("/dev/urandom", O_RDONLY);
+#endif
 		g_efa_selected_device_cnt++;
 	}
 
@@ -315,8 +422,16 @@ void efa_device_list_finalize(void)
 	int i;
 
 	if (g_efa_selected_device_list) {
-		for (i = 0; i < g_efa_selected_device_cnt; i++)
+		for (i = 0; i < g_efa_selected_device_cnt; i++) {
+			ofi_genlock_destroy(&g_efa_selected_device_list[i].qp_table_lock);
+
+#ifndef _WIN32
+			if (g_efa_selected_device_list[i].urandom_fd >= 0)
+				close(g_efa_selected_device_list[i].urandom_fd);
+#endif
+
 			efa_device_destruct(&g_efa_selected_device_list[i]);
+		}
 
 		free(g_efa_selected_device_list);
 		g_efa_selected_device_list = NULL;
@@ -427,6 +542,8 @@ static char *get_sysfs_path(void)
 
 	if (env) {
 		sysfs_path = strndup(env, IBV_SYSFS_PATH_MAX);
+		if (!sysfs_path)
+			return NULL;
 		len = strlen(sysfs_path);
 		while (len > 0 && sysfs_path[len - 1] == '/') {
 			--len;

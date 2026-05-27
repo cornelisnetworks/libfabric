@@ -14,7 +14,7 @@
 . ftr VB CB
 . ftr VBI CBI
 .\}
-.TH "fi_rma" "3" "2024\-12\-10" "Libfabric Programmer\[cq]s Manual" "#VERSION#"
+.TH "fi_rma" "3" "2026\-04\-27" "Libfabric Programmer\[cq]s Manual" "#VERSION#"
 .hy
 .SH NAME
 .PP
@@ -70,7 +70,8 @@ Fabric endpoint on which to initiate read or write operation.
 .TP
 \f[I]buf\f[R]
 Local data buffer to read into (read target) or write from (write
-source)
+source).
+For 0-byte operations, buf may be ignored.
 .TP
 \f[I]len\f[R]
 Length of data to read or write, specified in bytes.
@@ -78,9 +79,11 @@ Valid transfers are from 0 bytes up to the endpoint\[cq]s max_msg_size.
 .TP
 \f[I]iov\f[R]
 Vectored data buffer.
+For 0-byte operations, iov may be ignored.
 .TP
 \f[I]count\f[R]
 Count of vectored data entries.
+For 0-byte operations, count may be 0.
 .TP
 \f[I]addr\f[R]
 Address of remote memory to access.
@@ -92,7 +95,9 @@ FI_MR_SCALABLE.
 Protection key associated with the remote memory.
 .TP
 \f[I]desc\f[R]
-Descriptor associated with the local data buffer See \f[V]fi_mr\f[R](3).
+Descriptor associated with the local data buffer.
+For 0-byte operations, desc may be ignored even for FI_MR_LOCAL.
+See \f[V]fi_mr\f[R](3).
 .TP
 \f[I]data\f[R]
 Remote CQ data to transfer with the operation.
@@ -185,11 +190,19 @@ struct fi_rma_iov {
 };
 \f[R]
 .fi
+.PP
+For 0-byte operations, msg_iov, desc (including FI_MR_LOCAL), and
+iov_count may be ignored.
 .SS fi_inject_write
 .PP
 The write inject call is an optimized version of fi_write.
 It provides similar completion semantics as fi_inject
 \f[V]fi_msg\f[R](3).
+.PP
+If FI_HMEM is enabled and the provider requires the FI_MR_HMEM mr_mode,
+the fi_inject_write call can only accept buffers with iface equal to
+FI_HMEM_SYSTEM.
+This limitation does not affect how inject_size is reported.
 .SS fi_writedata
 .PP
 The write data call is similar to fi_write, but allows for the sending
@@ -243,6 +256,9 @@ Indicates that the user has additional requests that will immediately be
 posted after the current call returns.
 Use of this flag may improve performance by enabling the provider to
 optimize its access to the fabric hardware.
+Providers that utilize delayed start optimizations for communication
+calls with FI_MORE flag set must ensure that all previously delayed
+calls be flushed when an error is returned from a new call.
 .TP
 \f[I]FI_INJECT\f[R]
 Applies to fi_writemsg.
@@ -252,6 +268,9 @@ handled asynchronously.
 This may require that the underlying provider implementation copy the
 data into a local buffer and transfer out of that buffer.
 This flag can only be used with messages smaller than inject_size.
+If FI_HMEM is enabled and the provider requires the FI_MR_HMEM mr_mode,
+the FI_INJECT flag can only be used with buffers whose iface is
+FI_HMEM_SYSTEM.
 .TP
 \f[I]FI_INJECT_COMPLETE\f[R]
 Applies to fi_writemsg.

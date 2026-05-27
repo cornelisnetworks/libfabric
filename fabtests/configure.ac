@@ -5,7 +5,7 @@ dnl
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.57)
-AC_INIT([fabtests], [2.5.0a1], [ofiwg@lists.openfabrics.org])
+AC_INIT([fabtests], [2.6.0a1], [ofiwg@lists.openfabrics.org])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR(config)
 AC_CONFIG_HEADERS(config.h)
@@ -74,6 +74,13 @@ AC_ARG_ENABLE([lpp],
 	[], [enable_lpp=yes])
 
 AM_CONDITIONAL([ENABLE_LPP], [test x"$enable_lpp" = x"yes"])
+
+AC_ARG_ENABLE([verbs],
+	[AS_HELP_STRING([--enable-verbs],
+		[Enable verbs provider specific tests - default YES])],
+	[], [enable_verbs=yes])
+
+AM_CONDITIONAL([ENABLE_VERBS], [test x"$enable_verbs" = x"yes"])
 
 AC_DEFUN([FI_ARG_ENABLE_SANITIZER],[
         AC_ARG_ENABLE([$1],
@@ -258,7 +265,9 @@ AC_CHECK_HEADER([rdma/fabric.h], [],
     [AC_MSG_ERROR([<rdma/fabric.h> not found.  fabtests requires libfabric.])])
 
 AC_ARG_WITH([ze],
-            AS_HELP_STRING([--with-ze], [Use non-default ZE location - default NO]),
+            AS_HELP_STRING([--with-ze], [Enable Level-Zero (Ze) support and fail if not found.
+                                         Optional=<Path to where the Level-Zero libraries and
+                                         headers are installed.>]),
             AS_IF([test x"$withval" != x"no"],
 		  [CPPFLAGS="-I$withval/include $CPPFLAGS"
 		   LDFLAGS="-L$withval/$lib $LDFLAGS"]))
@@ -307,6 +316,11 @@ AC_DEFINE_UNQUOTED([HAVE_EPOLL], [$have_epoll],
 dnl Check for 128-bit integer support
 AC_CHECK_TYPE([__int128],
 	[AC_DEFINE(HAVE___INT128, 1, [Set to 1 to use 128-bit ints])])
+
+dnl Check for random_r function
+AC_CHECK_FUNC([random_r], [have_random_r=1], [have_random_r=0])
+AC_DEFINE_UNQUOTED([HAVE_RANDOM_R], [$have_random_r],
+		   [Defined to 1 if random_r is available])
 
 AC_CONFIG_FILES([Makefile fabtests.spec])
 

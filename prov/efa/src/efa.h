@@ -37,6 +37,7 @@
 #include "ofi_file.h"
 
 #include "efa_base_ep.h"
+#include "efa_direct_ope.h"
 #include "efa_mr.h"
 #include "efa_env.h"
 #include "efa_shm.h"
@@ -91,21 +92,6 @@
 #define EFA_DEFAULT_INTER_MIN_READ_MESSAGE_SIZE (1048576)
 #define EFA_DEFAULT_INTER_MIN_READ_WRITE_SIZE (65536)
 #define EFA_DEFAULT_INTRA_MAX_GDRCOPY_FROM_DEV_SIZE (3072)
-
-/*
- * The default memory alignment
- */
-#define EFA_RDM_DEFAULT_MEMORY_ALIGNMENT (8)
-
-/*
- * The CUDA memory alignment
- */
-#define EFA_RDM_CUDA_MEMORY_ALIGNMENT (64)
-
-/*
- * The alignment to support in-order aligned ops.
- */
-#define EFA_RDM_IN_ORDER_ALIGNMENT (128)
 
 /*
  * Set alignment to x86 cache line size.

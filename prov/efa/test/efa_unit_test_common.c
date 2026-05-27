@@ -118,6 +118,14 @@ void efa_unit_test_resource_construct_with_hints(struct efa_resource *resource,
 	if (ret)
 		goto err;
 
+	/* Allocate wr_id vector based on actual tx pool size */
+	if (!g_ibv_submitted_wr_id_vec) {
+		struct efa_base_ep *base_ep = container_of(resource->ep, struct efa_base_ep, util_ep.ep_fid);
+		g_ibv_submitted_wr_id_capacity = efa_base_ep_get_tx_pool_size(base_ep);
+		g_ibv_submitted_wr_id_vec = calloc(g_ibv_submitted_wr_id_capacity, sizeof(void *));
+		assert(g_ibv_submitted_wr_id_vec);
+	}
+
 	ret = fi_eq_open(resource->fabric, &eq_attr, &resource->eq, NULL);
 	if (ret)
 		goto err;
@@ -262,6 +270,12 @@ void efa_unit_test_resource_destruct(struct efa_resource *resource)
 		assert_int_equal(fi_close(&resource->ep->fid), 0);
 	}
 
+	if (g_ibv_submitted_wr_id_vec) {
+		free(g_ibv_submitted_wr_id_vec);
+		g_ibv_submitted_wr_id_vec = NULL;
+		g_ibv_submitted_wr_id_capacity = 0;
+	}
+
 	if (resource->eq) {
 		assert_int_equal(fi_close(&resource->eq->fid), 0);
 	}
@@ -355,7 +369,7 @@ void efa_unit_test_eager_msgrtm_pkt_construct(struct efa_rdm_pke *pkt_entry, str
  * @brief Construct EFA_RDM_HANDSHAKE_PKT
  *
  * This will append any optional handshake packet fields (see EFA RDM protocol
- * spec) iff they are non-zero in attr. This function is used to create a mock 
+ * spec) if they are non-zero in attr. This function is used to create a mock
  * handshake packet to test the receive path handling of the packet.
  *
  * @param[in,out]	pkt_entry	Packet entry. Must be non-NULL.
@@ -389,6 +403,7 @@ struct efa_rdm_ope *efa_unit_test_alloc_txe(struct efa_resource *resource, uint3
 	struct efa_rdm_peer *peer;
 	struct fi_msg msg = {0};
 	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_ope *txe;
 
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 
@@ -401,7 +416,12 @@ struct efa_rdm_ope *efa_unit_test_alloc_txe(struct efa_resource *resource, uint3
 
 	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
 
-	return efa_rdm_ep_alloc_txe(efa_rdm_ep, peer, &msg, op, 0, 0);
+	txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
+	if (!txe)
+		return NULL;
+
+	efa_rdm_txe_construct(txe, efa_rdm_ep, peer, &msg, op, 0, 0);
+	return txe;
 }
 
 struct efa_rdm_ope *efa_unit_test_alloc_rxe(struct efa_resource *resource, uint32_t op)
@@ -424,4 +444,30 @@ struct efa_rdm_ope *efa_unit_test_alloc_rxe(struct efa_resource *resource, uint3
 
 	/* TODO - peer struct might need more info */
 	return efa_rdm_ep_alloc_rxe(efa_rdm_ep, peer, op);
+}
+
+
+void efa_unit_test_rdm_0byte_prep(struct efa_resource *resource, fi_addr_t *addr)
+{
+	struct efa_ep_addr raw_addr;
+	size_t raw_addr_len = sizeof(raw_addr);
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_peer *peer;
+	int ret;
+
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
+
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, addr, 0, NULL);
+	assert_int_equal(ret, 1);
+
+	/* Mark peer as handshake received and enable RDMA write/read */
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+	peer = efa_rdm_ep_get_peer(efa_rdm_ep, *addr);
+	peer->flags |= EFA_RDM_PEER_HANDSHAKE_RECEIVED;
+	peer->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_RDMA_WRITE | EFA_RDM_EXTRA_FEATURE_RDMA_READ | EFA_RDM_EXTRA_FEATURE_UNSOLICITED_WRITE_RECV;
 }

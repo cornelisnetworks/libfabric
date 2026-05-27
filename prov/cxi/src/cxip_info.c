@@ -651,7 +651,7 @@ struct cxip_environment cxip_env = {
 	.hybrid_unexpected_msg_preemptive = 0,
 	.fc_retry_usec_delay = 1000,
 	.cntr_spin_before_yield = 1000,
-	.ctrl_rx_eq_max_size = 67108864,
+	.ctrl_rx_eq_max_size = CXIP_MAX_RX_EQ_SIZE,
 	.default_cq_size = CXIP_CQ_DEF_SZ,
 	.default_tx_size = CXIP_DEFAULT_TX_SIZE,
 	.default_rx_size = CXIP_DEFAULT_RX_SIZE,
@@ -683,6 +683,8 @@ struct cxip_environment cxip_env = {
 	.force_dev_reg_copy = false,
 	.mr_target_ordering = MR_ORDER_DEFAULT,
 	.disable_cuda_sync_memops = false,
+	.enable_writedata = false,
+	.rnr_append_retry_timeout_us = CXIP_RNR_APPEND_RETRY_TIMEOUT_US,
 };
 
 static void cxip_env_init(void)
@@ -731,6 +733,11 @@ static void cxip_env_init(void)
 		CXIP_INFO("Invalid RNR timeout, using (%d us)\n",
 			  cxip_env.rnr_max_timeout_us);
 	}
+	fi_param_define(&cxip_prov, "rnr_append_retry_timeout_us", FI_PARAM_INT,
+			"RNR append retry time micro-seconds (default: %d).",
+			cxip_env.rnr_append_retry_timeout_us);
+	fi_param_get_int(&cxip_prov, "rnr_append_retry_timeout_us",
+			 &cxip_env.rnr_append_retry_timeout_us);
 
 	fi_param_define(&cxip_prov, "enable_trig_op_limit", FI_PARAM_BOOL,
 			"Enable enforcement of triggered operation limit. "
@@ -957,6 +964,12 @@ static void cxip_env_init(void)
 	fi_param_get_bool(&cxip_prov, "mr_match_events",
 			  &cxip_env.mr_match_events);
 
+	fi_param_define(&cxip_prov, "enable_writedata", FI_PARAM_BOOL,
+			"Enable dual MR entries for FI_WRITEDATA support (default %d).",
+			cxip_env.enable_writedata);
+	fi_param_get_bool(&cxip_prov, "enable_writedata",
+			  &cxip_env.enable_writedata);
+
 	fi_param_define(&cxip_prov, "prov_key_cache", FI_PARAM_BOOL,
 			"Disable caching of FI_MR_PROV_KEY (default %lu).",
 			&cxip_env.prov_key_cache);
@@ -1106,6 +1119,11 @@ static void cxip_env_init(void)
 			cxip_env.ctrl_rx_eq_max_size);
 	fi_param_get_size_t(&cxip_prov, "ctrl_rx_eq_max_size",
 			    &cxip_env.ctrl_rx_eq_max_size);
+	if (cxip_env.ctrl_rx_eq_max_size == 0) {
+		cxip_env.ctrl_rx_eq_max_size = CXIP_MAX_RX_EQ_SIZE; 
+		CXIP_WARN("ctrl_rx_eq_max_size invalid. Setting to default %lu\n",
+			  cxip_env.ctrl_rx_eq_max_size);
+	}
 
 	fi_param_define(&cxip_prov, "default_cq_size", FI_PARAM_SIZE_T,
 			"Default provider CQ size (default: %lu).",

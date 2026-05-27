@@ -259,6 +259,14 @@ static inline void smr_freestack_push_by_offset(struct smr_freestack *fs,
                         fs->object_size);
 }
 
+/* Get entry index in fs */
+static inline int16_t smr_freestack_get_index(struct smr_freestack *fs,
+					      char *local_p)
+{
+	uint64_t offset = ((char*) local_p - (char*) fs);
+	return (offset - fs->entry_base_offset) / fs->object_size;
+}
+
 /* Push by object */
 static inline void smr_freestack_push(struct smr_freestack *fs, void *local_p)
 {
@@ -278,9 +286,9 @@ static inline void smr_freestack_init(struct smr_freestack *fs, size_t elem_coun
 	fs->entry_base_offset =
 		((char*) &fs->entry_next[0] - (char*) fs) +
 		fs->size * sizeof(fs->top);
-	next_aligned_addr = ofi_get_aligned_size((( (uint64_t) fs) +
+	next_aligned_addr = ofi_get_aligned_size((( (uintptr_t) fs) +
 			fs->entry_base_offset), SMR_ALIGN_BOUNDARY);
-	fs->entry_base_offset = next_aligned_addr - ((uint64_t) fs);
+	fs->entry_base_offset = next_aligned_addr - ((uintptr_t) fs);
 	for (i = elem_count - 1; i >= 0; i--)
 		smr_freestack_push_by_index(fs, i);
 }
@@ -318,6 +326,12 @@ static inline void* smr_freestack_pop(struct smr_freestack *fs)
 {
 	return (void *) ( ((char*)fs) + smr_freestack_pop_by_offset(fs) );
 }
+
+static inline int16_t smr_freestack_avail(struct smr_freestack *fs)
+{
+	return fs->free;
+}
+
 /*
  * Buffer Pool
  */

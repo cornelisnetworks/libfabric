@@ -36,6 +36,7 @@
 #include <getopt.h>
 #include <string.h>
 #include <netdb.h>
+#include <inttypes.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 
@@ -663,7 +664,7 @@ av_lookup_good(void)
 
 	for (i = 0; i < num_good_addr; i++) {
 		if (fi_addr[i] == FI_ADDR_NOTAVAIL) {
-			sprintf(err_buf, "fi_addr[%d]=%ld, expected %d", i,
+			sprintf(err_buf, "fi_addr[%d]=%" PRIu64 ", expected %d", i,
 				fi_addr[i], i);
 			goto fail;
 		}
@@ -754,7 +755,7 @@ av_lookup_bad(void)
 
 	for (i = 0; i < num_good_addr; i++) {
 		if (fi_addr[i] == FI_ADDR_NOTAVAIL) {
-			sprintf(err_buf, "fi_addr[%d]=%ld, expected %d", i,
+			sprintf(err_buf, "fi_addr[%d]=%" PRIu64 ", expected %d", i,
 				fi_addr[i], i);
 			goto fail;
 		}
@@ -865,7 +866,7 @@ av_remove_good(void)
 
 	for (i = 0; i < num_good_addr; i++) {
 		if (fi_addr[i] == FI_ADDR_NOTAVAIL) {
-			sprintf(err_buf, "fi_addr[%d] expected %d, actual %ld",
+			sprintf(err_buf, "fi_addr[%d] expected %d, actual %" PRIu64,
 				i, i, fi_addr[i]);
 			goto fail;
 		}
@@ -935,7 +936,7 @@ static int av_remove_bad(void)
 
 	for (i = 0; i < num_good_addr; i++) {
 		if (fi_addr[i] == FI_ADDR_NOTAVAIL) {
-			sprintf(err_buf, "fi_addr[%d] expected %d, actual %ld",
+			sprintf(err_buf, "fi_addr[%d] expected %d, actual %" PRIu64,
 				i, i, fi_addr[i]);
 			goto fail;
 		}
@@ -1055,7 +1056,7 @@ static void usage(char *name)
 
 int main(int argc, char **argv)
 {
-	int op, ret;
+	int op, ret, cleanup_ret;
 	int failed;
 
 	opts = INIT_OPTS;
@@ -1138,6 +1139,8 @@ int main(int argc, char **argv)
 	}
 
 err:
-	ft_free_res();
-	return ret ? ft_exit_code(ret) : (failed > 0) ? EXIT_FAILURE : EXIT_SUCCESS;
+	cleanup_ret = ft_free_res();
+	return ret ? ft_exit_code(ret) :
+		cleanup_ret ? ft_exit_code(cleanup_ret) :
+			(failed > 0) ? EXIT_FAILURE : EXIT_SUCCESS;
 }

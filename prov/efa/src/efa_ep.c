@@ -218,7 +218,8 @@ static int efa_ep_close(fid_t fid)
 	if (ret) {
 		EFA_WARN(FI_LOG_EP_CTRL, "Unable to close base endpoint\n");
 	}
-
+	if (efa_env.track_mr)
+		efa_direct_ope_pool_destroy(ep);
 	free(ep);
 
 	return 0;
@@ -338,13 +339,18 @@ static int efa_ep_enable(struct fid_ep *ep_fid)
 
 	ep = container_of(ep_fid, struct efa_base_ep, util_ep.ep_fid);
 
-	err = efa_base_ep_create_and_enable_qp(ep, false);
+	err = efa_base_ep_create_and_enable_qp(ep);
 	if (err)
 		return err;
 
 	err = efa_base_ep_insert_cntr_ibv_cq_poll_list(ep);
-	if (err)
+	if (err) {
 		efa_base_ep_destruct_qp(ep);
+		return err;
+	}
+
+	if (efa_env.track_mr)
+		err = efa_direct_ope_pool_create(ep);
 
 	return err;
 }

@@ -25,7 +25,7 @@ int __real_ibv_destroy_ah(struct ibv_ah *ibv_ah);
 
 struct ibv_ah *efa_mock_ibv_create_ah_check_mock(struct ibv_pd *pd, struct ibv_ah_attr *attr);
 
-struct ibv_ah *efa_mock_ibv_create_ah_mock_enomem(struct ibv_pd *pd, struct ibv_ah_attr *attr);
+struct ibv_ah *efa_mock_ibv_create_ah_return_null(struct ibv_pd *pd, struct ibv_ah_attr *attr);
 
 struct ibv_ah *efa_mock_ibv_create_ah_dont_create_self_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr);
 
@@ -53,9 +53,9 @@ void efa_mock_efa_ah_release_dont_create_self_ah(struct efa_domain *domain,
 int efa_mock_efadv_query_device_return_mock(struct ibv_context *ibvctx, struct efadv_device_attr *attr,
 					    uint32_t inlen);
 
-extern void *g_ibv_submitted_wr_id_vec[EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND];
-
+extern void **g_ibv_submitted_wr_id_vec;
 extern int g_ibv_submitted_wr_id_cnt;
+extern int g_ibv_submitted_wr_id_capacity;
 
 void efa_ibv_ah_limit_cnt_reset();
 
@@ -126,10 +126,12 @@ int efa_mock_ibv_post_recv(struct ibv_qp *qp, struct ibv_recv_wr *wr,
 /* EFA data path ops mock helpers */
 int efa_mock_efa_qp_post_recv_return_mock(struct efa_qp *qp, struct ibv_recv_wr *wr, struct ibv_recv_wr **bad);
 int efa_mock_efa_qp_post_send_return_mock(struct efa_qp *qp, const struct ibv_sge *sge_list, const struct ibv_data_buf *inline_data_list, size_t iov_count, bool use_inline, uintptr_t wr_id, uint64_t data, uint64_t flags, struct efa_ah *ah, uint32_t qpn, uint32_t qkey);
+int efa_mock_efa_qp_post_send_verify_not_inline(struct efa_qp *qp, const struct ibv_sge *sge_list, const struct ibv_data_buf *inline_data_list, size_t iov_count, bool use_inline, uintptr_t wr_id, uint64_t data, uint64_t flags, struct efa_ah *ah, uint32_t qpn, uint32_t qkey);
 int efa_mock_efa_qp_post_send_verify_handshake_pkt_local_host_id_and_save_wr(struct efa_qp *qp, const struct ibv_sge *sge_list, const struct ibv_data_buf *inline_data_list, size_t iov_count, bool use_inline, uintptr_t wr_id, uint64_t data, uint64_t flags, struct efa_ah *ah, uint32_t qpn, uint32_t qkey);
 int efa_mock_efa_qp_post_read_return_mock(struct efa_qp *qp, const struct ibv_sge *sge_list, size_t sge_count, uint32_t remote_key, uint64_t remote_addr, uintptr_t wr_id, uint64_t flags, struct efa_ah *ah, uint32_t qpn, uint32_t qkey);
 int efa_mock_efa_qp_post_write_return_mock(struct efa_qp *qp, const struct ibv_sge *sge_list, size_t sge_count, uint32_t remote_key, uint64_t remote_addr, uintptr_t wr_id, uint64_t data, uint64_t flags, struct efa_ah *ah, uint32_t qpn, uint32_t qkey);
 int efa_mock_efa_ibv_cq_start_poll_return_mock(struct efa_ibv_cq *ibv_cq, struct ibv_poll_cq_attr *attr);
+int efa_mock_efa_ibv_cq_next_poll_access_cur_wq(struct efa_ibv_cq *ibv_cq);
 int efa_mock_efa_ibv_cq_next_poll_return_mock(struct efa_ibv_cq *ibv_cq);
 int efa_mock_efa_ibv_cq_next_poll_simulate_status_change(struct efa_ibv_cq *ibv_cq);
 enum ibv_wc_opcode efa_mock_efa_ibv_cq_wc_read_opcode_return_mock(struct efa_ibv_cq *ibv_cq);
@@ -152,6 +154,20 @@ void efa_mock_ibv_wr_rdma_read_save_wr(struct ibv_qp_ex *qp, uint32_t rkey,
 void efa_mock_ibv_wr_rdma_write_imm_save_wr(struct ibv_qp_ex *qp, uint32_t rkey,
 					    uint64_t remote_addr,
 					    __be32 imm_data);
+void efa_mock_ibv_wr_start_no_op(struct ibv_qp_ex *qp);
+void efa_mock_ibv_wr_rdma_write_save_wr(struct ibv_qp_ex *qp, uint32_t rkey,
+					uint64_t remote_addr);
+void efa_mock_ibv_wr_set_sge_list_no_op(struct ibv_qp_ex *qp,
+					size_t num_sge,
+					const struct ibv_sge *sge_list);
+void efa_mock_ibv_wr_set_ud_addr_no_op(struct ibv_qp_ex *qp, struct ibv_ah *ah,
+				       uint32_t remote_qpn, uint32_t remote_qkey);
+int efa_mock_ibv_wr_complete_no_op(struct ibv_qp_ex *qp);
+
+#if HAVE_EFADV_WR_PROCESSING_HINTS
+void efa_mock_efadv_wr_set_processing_hints(struct efadv_qp *efadv_qp,
+					    uint32_t hints);
+#endif
 
 struct efa_unit_test_mocks
 {
@@ -238,6 +254,26 @@ struct efa_unit_test_mocks
 #if HAVE_EFADV_QUERY_CQ
 	int (*efadv_query_cq)(struct ibv_cq *ibvcq, struct efadv_cq_attr *attr, uint32_t inlen);
 #endif
+
+	/* When non-zero, __wrap_calloc will return NULL if nmemb matches this value */
+	size_t calloc_fail_nmemb;
+
+#if HAVE_EFADV_CREATE_COMP_CNTR
+	struct ibv_comp_cntr *(*efadv_create_comp_cntr)(struct ibv_context *context,
+						      struct ibv_comp_cntr_init_attr *attr,
+						      struct efadv_comp_cntr_init_attr *efa_attr,
+						      uint32_t inlen);
+	int (*ibv_destroy_comp_cntr)(struct ibv_comp_cntr *cntr);
+	int (*ibv_inc_comp_cntr)(struct ibv_comp_cntr *comp_cntr, uint64_t amount);
+	int (*ibv_inc_err_comp_cntr)(struct ibv_comp_cntr *comp_cntr, uint64_t amount);
+	int (*ibv_set_comp_cntr)(struct ibv_comp_cntr *comp_cntr, uint64_t value);
+	int (*ibv_set_err_comp_cntr)(struct ibv_comp_cntr *comp_cntr, uint64_t value);
+	int (*ibv_read_comp_cntr)(struct ibv_comp_cntr *comp_cntr, uint64_t *value);
+	int (*ibv_read_err_comp_cntr)(struct ibv_comp_cntr *comp_cntr, uint64_t *value);
+	int (*ibv_qp_attach_comp_cntr)(struct ibv_qp *qp,
+				       struct ibv_comp_cntr *comp_cntr,
+				       struct ibv_comp_cntr_attach_attr *attr);
+#endif
 };
 
 struct ibv_cq_ex *efa_mock_create_cq_ex_return_null(struct ibv_context *context, struct ibv_cq_init_attr_ex *init_attr);
@@ -304,6 +340,45 @@ enum ibv_fork_status __real_ibv_is_fork_initialized(void);
 enum ibv_fork_status efa_mock_ibv_is_fork_initialized_return_mock(void);
 
 bool __real_efa_ibv_cq_wc_is_unsolicited(struct efa_ibv_cq *ibv_cq);
+
+#if HAVE_EFADV_CREATE_COMP_CNTR
+struct ibv_comp_cntr *__real_efadv_create_comp_cntr(struct ibv_context *context,
+						  struct ibv_comp_cntr_init_attr *attr,
+						  struct efadv_comp_cntr_init_attr *efa_attr,
+						  uint32_t inlen);
+int __real_ibv_destroy_comp_cntr(struct ibv_comp_cntr *cntr);
+
+struct ibv_comp_cntr *efa_mock_efadv_create_comp_cntr_return_mock(
+	struct ibv_context *context, struct ibv_comp_cntr_init_attr *attr,
+	struct efadv_comp_cntr_init_attr *efa_attr, uint32_t inlen);
+struct ibv_comp_cntr *efa_mock_efadv_create_comp_cntr_return_null_enotsup(
+	struct ibv_context *context, struct ibv_comp_cntr_init_attr *attr,
+	struct efadv_comp_cntr_init_attr *efa_attr, uint32_t inlen);
+int efa_mock_ibv_destroy_comp_cntr_return_mock(struct ibv_comp_cntr *cntr);
+
+int __real_ibv_inc_comp_cntr(struct ibv_comp_cntr *comp_cntr, uint64_t amount);
+int __real_ibv_inc_err_comp_cntr(struct ibv_comp_cntr *comp_cntr, uint64_t amount);
+int __real_ibv_set_comp_cntr(struct ibv_comp_cntr *comp_cntr, uint64_t value);
+int __real_ibv_set_err_comp_cntr(struct ibv_comp_cntr *comp_cntr, uint64_t value);
+int __real_ibv_read_comp_cntr(struct ibv_comp_cntr *comp_cntr, uint64_t *value);
+int __real_ibv_read_err_comp_cntr(struct ibv_comp_cntr *comp_cntr, uint64_t *value);
+
+int efa_mock_ibv_inc_comp_cntr_return_mock(struct ibv_comp_cntr *comp_cntr, uint64_t amount);
+int efa_mock_ibv_inc_err_comp_cntr_return_mock(struct ibv_comp_cntr *comp_cntr, uint64_t amount);
+int efa_mock_ibv_set_comp_cntr_return_mock(struct ibv_comp_cntr *comp_cntr, uint64_t value);
+int efa_mock_ibv_set_err_comp_cntr_return_mock(struct ibv_comp_cntr *comp_cntr, uint64_t value);
+int efa_mock_ibv_read_comp_cntr_return_mock(struct ibv_comp_cntr *comp_cntr, uint64_t *value);
+int efa_mock_ibv_read_err_comp_cntr_return_mock(struct ibv_comp_cntr *comp_cntr, uint64_t *value);
+int __real_ibv_qp_attach_comp_cntr(struct ibv_qp *qp,
+				   struct ibv_comp_cntr *comp_cntr,
+				   struct ibv_comp_cntr_attach_attr *attr);
+int efa_mock_ibv_qp_attach_comp_cntr_return_mock(struct ibv_qp *qp,
+						  struct ibv_comp_cntr *comp_cntr,
+						  struct ibv_comp_cntr_attach_attr *attr);
+int efa_mock_ibv_qp_attach_comp_cntr_return_enotsup(struct ibv_qp *qp,
+						     struct ibv_comp_cntr *comp_cntr,
+						     struct ibv_comp_cntr_attach_attr *attr);
+#endif
 
 #endif
 

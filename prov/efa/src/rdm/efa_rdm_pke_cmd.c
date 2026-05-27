@@ -51,10 +51,8 @@ int efa_rdm_pke_fill_data(struct efa_rdm_pke *pkt_entry,
 {
 	int ret = 0;
 
-
-	if (efa_both_support_zero_hdr_data_transfer(pkt_entry->ep, ope->peer)) {
-		/* zero hdr transfer only happens for eager msg (non-tagged) pkt */
-		assert(pkt_type == EFA_RDM_EAGER_MSGRTM_PKT);
+	if (efa_rdm_peer_expects_zero_hdr_data_transfer(ope->peer) &&
+	    pkt_type == EFA_RDM_EAGER_MSGRTM_PKT) {
 		pkt_entry->flags |= EFA_RDM_PKE_SEND_TO_USER_RECV_QP | EFA_RDM_PKE_HAS_NO_BASE_HDR;
 	}
 
@@ -646,16 +644,16 @@ void efa_rdm_pke_handle_send_completion(struct efa_rdm_pke *pkt_entry)
 	case EFA_RDM_DC_LONGCTS_MSGRTM_PKT:
 	case EFA_RDM_DC_LONGCTS_TAGRTM_PKT:
 	case EFA_RDM_DC_LONGCTS_RTW_PKT:
-		/* no action to be taken here
-		 * For non-dc version of these packet types,
-		 * this is the place to increase bytes_acked or
-		 * write tx completion.
-		 * For dc, tx completion will always be
-		 * written upon receving the receipt packet
-		 * Moreoever, because receipt can arrive
-		 * before send completion, we cannot take
-		 * any action on txe here.
+		/* For DC packets, use efa_outstanding_tx_ops to track TX completions
+		 * instead of bytes_acked to avoid issues with unset payload_size.
+		 * Note: efa_rdm_ep_record_tx_op_completed() above decrements efa_outstanding_tx_ops,
+		 * so this check must come after that call.
+		 * Only release TXE when both TX ops complete and receipt is received.
 		 */
+		assert(pkt_entry->ope);
+		if (efa_rdm_txe_dc_ready_for_release(pkt_entry->ope))
+			efa_rdm_txe_release(pkt_entry->ope);
+		break;
 	case EFA_RDM_READ_NACK_PKT:
 		/* no action needed for NACK packet */
 		break;

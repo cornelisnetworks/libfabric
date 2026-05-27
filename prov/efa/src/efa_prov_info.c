@@ -95,6 +95,9 @@ int efa_prov_info_set_domain_attr(struct fi_info *prov_info,
 	prov_info->domain_attr->max_ep_rx_ctx	= 1;
 	prov_info->domain_attr->resource_mgmt	= FI_RM_DISABLED;
 	prov_info->domain_attr->mr_cnt		= device->ibv_attr.max_mr;
+	prov_info->domain_attr->cntr_cnt    = device->max_comp_cntr;
+	prov_info->domain_attr->max_cntr_value	= UINT64_MAX;
+	prov_info->domain_attr->max_err_cntr_value = UINT64_MAX;
 
 	if (ep_type == FI_EP_RDM) {
 		/* EFA direct path is thread safe */
@@ -534,11 +537,11 @@ err_free:
 /**
  * @brief allocate an prov_info object that matches the functionality of EFA RDM endpoint
  *
- * EFA RDM endpoint implemented mulitple additional functionalities over rdma-core
+ * EFA RDM endpoint implemented multiple additional functionalities over rdma-core
  * SRD QP. The added functionalities
  * include:
  *
- * tag matching, orderred send/receive, message segmentation,
+ * tag matching, ordered send/receive, message segmentation,
  * emulated RMA/atomic emulation, multi recv.
  *
  * This function allocates a prov_info object the matches EFA RDM endpoint's functionality.
