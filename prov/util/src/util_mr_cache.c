@@ -307,7 +307,7 @@ util_mr_cache_create(struct ofi_mr_cache *cache, struct ofi_mr_info *info,
 	assert(ofi_iov_within(&(*info).iov, &(*entry)->info.iov));
 	*info = (*entry)->info;
 
-	struct ofi_rbnode *rbnode = ofi_rbnode_new(&cache->tree);
+	struct ofi_rbnode *rbnode = ofi_rbnode_alloc(&cache->tree);
 	if (OFI_UNLIKELY(!rbnode)) {
 		ret = -FI_ENOMEM;
 		goto free;
@@ -328,9 +328,8 @@ util_mr_cache_create(struct ofi_mr_cache *cache, struct ofi_mr_info *info,
 					  (void *) &(*entry)->info,
 					  (void *) *entry, &(*entry)->node,
 					  rbnode);
-		if (ret) {
+		if (ret)
 			goto unlock;
-		}
 		rbnode = NULL; /* now owned by the tree */
 
 		cache->cached_cnt++;
@@ -345,17 +344,17 @@ util_mr_cache_create(struct ofi_mr_cache *cache, struct ofi_mr_info *info,
 			cache->uncached_size += (*entry)->info.iov.iov_len;
 		}
 	}
-	/* ofi_rbnode_del() only returns the node to the tree free list (never
+	/* ofi_rbnode_free() only returns the node to the tree free list (never
 	 * allocates), so it is safe to call while holding mm_lock.
 	 */
 	if (rbnode)
-		ofi_rbnode_del(&cache->tree, rbnode);
+		ofi_rbnode_free(&cache->tree, rbnode);
 	pthread_mutex_unlock(&mm_lock);
 	return 0;
 
 unlock:
 	if (rbnode)
-		ofi_rbnode_del(&cache->tree, rbnode);
+		ofi_rbnode_free(&cache->tree, rbnode);
 	pthread_mutex_unlock(&mm_lock);
 free:
 	util_mr_free_entry(cache, *entry);

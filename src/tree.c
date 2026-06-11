@@ -52,7 +52,7 @@
 #include <rdma/fi_errno.h>
 
 
-static struct ofi_rbnode *ofi_rbnode_alloc(struct ofi_rbmap *map)
+struct ofi_rbnode *ofi_rbnode_alloc(struct ofi_rbmap *map)
 {
 	struct ofi_rbnode *node;
 
@@ -64,20 +64,10 @@ static struct ofi_rbnode *ofi_rbnode_alloc(struct ofi_rbmap *map)
 	return node;
 }
 
-static void ofi_rbnode_free(struct ofi_rbmap *map, struct ofi_rbnode *node)
+void ofi_rbnode_free(struct ofi_rbmap *map, struct ofi_rbnode *node)
 {
 	node->right = map->free_list ? map->free_list : NULL;
 	map->free_list = node;
-}
-
-struct ofi_rbnode *ofi_rbnode_new(struct ofi_rbmap *map)
-{
-	return ofi_rbnode_alloc(map);
-}
-
-void ofi_rbnode_del(struct ofi_rbmap *map, struct ofi_rbnode *node)
-{
-	ofi_rbnode_free(map, node);
 }
 
 void ofi_rbmap_init(struct ofi_rbmap *map,

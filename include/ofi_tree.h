@@ -100,8 +100,8 @@ void ofi_rbmap_delete(struct ofi_rbmap *map, struct ofi_rbnode *node);
 int ofi_rbmap_find_delete(struct ofi_rbmap *map, void *key);
 int ofi_rbmap_empty(struct ofi_rbmap *map);
 
-struct ofi_rbnode *ofi_rbnode_new(struct ofi_rbmap *map);
-void ofi_rbnode_del(struct ofi_rbmap *map, struct ofi_rbnode *node);
+struct ofi_rbnode *ofi_rbnode_alloc(struct ofi_rbmap *map);
+void ofi_rbnode_free(struct ofi_rbmap *map, struct ofi_rbnode *node);
 
 
 #endif /* OFI_TREE_H_ */
