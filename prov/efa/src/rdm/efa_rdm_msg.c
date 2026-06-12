@@ -66,9 +66,9 @@ int efa_rdm_msg_select_rtm(struct efa_rdm_ep *efa_rdm_ep, struct efa_rdm_ope *tx
 	tagged = (txe->op == ofi_op_tagged);
 	assert(tagged == 0 || tagged == 1);
 
-	iface = txe->desc[0] ? ((struct efa_mr*) txe->desc[0])->peer.iface : FI_HMEM_SYSTEM;
+	iface = txe->desc[0] ? ((struct efa_mr*) txe->desc[0])->iface : FI_HMEM_SYSTEM;
 
-	if (txe->fi_flags & FI_INJECT || efa_both_support_zero_hdr_data_transfer(efa_rdm_ep, txe->peer))
+	if (txe->fi_flags & FI_INJECT || efa_rdm_peer_expects_zero_hdr_data_transfer(txe->peer))
 		delivery_complete_requested = false;
 	else
 		delivery_complete_requested = txe->fi_flags & FI_DELIVERY_COMPLETE;
@@ -119,10 +119,11 @@ ssize_t efa_rdm_msg_post_rtm(struct efa_rdm_ep *ep, struct efa_rdm_ope *txe)
 	assert(txe->peer);
 
 	/*
-	 * It is required to get receiver's user recv QP through handshake
-	 * if sender supports this feature.
+	 * For backwards compatibility: if an old peer could have zero-copy
+	 * receive enabled, we must complete handshake before sending so we
+	 * can discover the peer's user_recv_qp and route packets accordingly.
 	 */
-	if ((ep->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP) &&
+	if (ep->peer_may_have_zcpy_rx &&
 	    !(txe->peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED)) {
 		return efa_rdm_ep_enforce_handshake_for_txe(ep, txe);
 	}
@@ -146,8 +147,11 @@ ssize_t efa_rdm_msg_post_rtm(struct efa_rdm_ep *ep, struct efa_rdm_ope *txe)
 	 *
 	 * Check handshake packet from peer to verify support status.
 	 */
-	if (!ep->homogeneous_peers && !(txe->peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED))
-		return efa_rdm_ep_enforce_handshake_for_txe(ep, txe);
+	if (!ep->homogeneous_peers && !(txe->peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED)) {
+		int ex_feature = EFA_RDM_PKT_TYPE_REQ_INFO_VEC[rtm_type].ex_feature_flag;
+		if (ex_feature)
+			return efa_rdm_ep_enforce_handshake_for_txe(ep, txe);
+	}
 
 	if (!ep->homogeneous_peers && !efa_rdm_pkt_type_is_supported_by_peer(rtm_type, txe->peer))
 		return -FI_EOPNOTSUPP;
@@ -156,32 +160,46 @@ ssize_t efa_rdm_msg_post_rtm(struct efa_rdm_ep *ep, struct efa_rdm_ope *txe)
 }
 
 static inline
-ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, struct efa_rdm_peer *peer, const struct fi_msg *msg,
-			     uint64_t tag, uint32_t op, uint64_t flags)
+ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, const struct fi_msg *msg,
+			     uint64_t tag, uint32_t op, uint64_t fi_flags,
+			     uint32_t internal_flags)
 {
 	ssize_t err;
 	struct efa_rdm_ope *txe;
-	struct util_srx_ctx *srx_ctx;
+	struct efa_rdm_peer *peer;
+	size_t available_tx_pkts;
 
 	efa_rdm_tracepoint(send_begin_msg_context,
 		    (size_t) msg->context, (size_t) msg->addr);
 
-	srx_ctx = efa_rdm_ep_get_peer_srx_ctx(ep);
-
 	assert(msg->iov_count <= ep->base_ep.info->tx_attr->iov_limit);
 
 	efa_perfset_start(ep, perf_efa_tx);
-	ofi_genlock_lock(srx_ctx->lock);
+	assert(ofi_genlock_held(&ep->base_ep.domain->srx_lock));
 
+	peer = efa_rdm_ep_get_peer_explicit(ep, msg->addr);
 	if (peer->flags & EFA_RDM_PEER_IN_BACKOFF) {
 		err = -FI_EAGAIN;
 		goto out;
 	}
 
-	txe = efa_rdm_ep_alloc_txe(ep, peer, msg, op, tag, flags);
+	// Handle case when there are no TX packets available
+	available_tx_pkts = efa_rdm_ep_get_available_tx_pkts(ep);
+	if (OFI_UNLIKELY(available_tx_pkts == 0)) {
+		err = -FI_EAGAIN;
+		goto out;
+	}
+
+	txe = ofi_buf_alloc(ep->ope_pool);
 	if (OFI_UNLIKELY(!txe)) {
 		err = -FI_EAGAIN;
 		goto out;
+	}
+
+	efa_rdm_txe_construct(txe, ep, peer, msg, op, fi_flags, internal_flags);
+	if (op == ofi_op_tagged) {
+		txe->cq_entry.tag = tag;
+		txe->tag = tag;
 	}
 
 	assert(txe->op == ofi_op_msg || txe->op == ofi_op_tagged);
@@ -191,7 +209,7 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, struct efa_rdm_peer *pee
 	EFA_DBG(FI_LOG_EP_DATA,
 		"peer: %" PRIu64
 		": size %lu tag: %lx op: %x flags: %lx msg_id: %" PRIu32 "\n",
-		peer->conn->fi_addr, txe->total_len, tag, op, flags, txe->msg_id);
+		peer->conn->fi_addr, txe->total_len, tag, op, fi_flags, txe->msg_id);
 
 	efa_rdm_tracepoint(send_begin, txe->msg_id,
 		    (size_t) txe->cq_entry.op_context, txe->total_len);
@@ -203,7 +221,6 @@ ssize_t efa_rdm_msg_generic_send(struct efa_rdm_ep *ep, struct efa_rdm_peer *pee
 	}
 
 out:
-	ofi_genlock_unlock(srx_ctx->lock);
 	efa_perfset_end(ep, perf_efa_tx);
 	return err;
 }
@@ -215,12 +232,12 @@ static
 ssize_t efa_rdm_msg_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 			uint64_t flags)
 {
-	struct efa_rdm_peer *peer;
 	struct efa_rdm_ep *efa_rdm_ep;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
 	struct fi_msg *shm_msg;
 	void **efa_desc = NULL;
 	fi_addr_t efa_addr;
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
@@ -229,26 +246,32 @@ ssize_t efa_rdm_msg_sendmsg(struct fid_ep *ep, const struct fi_msg *msg,
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, msg->addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		shm_msg = (struct fi_msg *)msg;
-		if (msg->desc) {
-			efa_desc = msg->desc;
-			efa_rdm_get_desc_for_shm(msg->iov_count, msg->desc, shm_desc);
-			shm_msg->desc = shm_desc;
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, msg->addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			shm_msg = (struct fi_msg *)msg;
+			if (msg->desc) {
+				efa_desc = msg->desc;
+				efa_rdm_get_desc_for_shm(msg->iov_count, msg->desc, shm_desc);
+				shm_msg->desc = shm_desc;
+			}
+			efa_addr = msg->addr;
+			shm_msg->addr = shm_addr;
+			ret = fi_sendmsg(efa_rdm_ep->shm_ep, shm_msg, flags);
+			/* Recover the application msg */
+			if (efa_desc)
+				shm_msg->desc = efa_desc;
+			shm_msg->addr = efa_addr;
+			return ret;
 		}
-		efa_addr = msg->addr;
-		shm_msg->addr = peer->conn->shm_fi_addr;
-		ret = fi_sendmsg(efa_rdm_ep->shm_ep, shm_msg, flags);
-		/* Recover the application msg */
-		if (efa_desc)
-			shm_msg->desc = efa_desc;
-		shm_msg->addr = efa_addr;
-		return ret;
 	}
 
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, msg, 0, ofi_op_msg, flags);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, msg, 0, ofi_op_msg, flags, 0);
+
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -258,8 +281,8 @@ ssize_t efa_rdm_msg_sendv(struct fid_ep *ep, const struct iovec *iov,
 {
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct fi_msg msg = {0};
-	struct efa_rdm_peer *peer;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
@@ -268,16 +291,21 @@ ssize_t efa_rdm_msg_sendv(struct fid_ep *ep, const struct iovec *iov,
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		if (desc)
-			efa_rdm_get_desc_for_shm(count, desc, shm_desc);
-		return fi_sendv(efa_rdm_ep->shm_ep, iov, shm_desc, count, peer->conn->shm_fi_addr, context);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			if (desc)
+				efa_rdm_get_desc_for_shm(count, desc, shm_desc);
+			return fi_sendv(efa_rdm_ep->shm_ep, iov, shm_desc, count, shm_addr, context);
+		}
 	}
 
 	efa_rdm_msg_construct(&msg, iov, desc, count, dest_addr, context, 0);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, 0, ofi_op_msg, efa_rdm_tx_flags(efa_rdm_ep));
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg, efa_rdm_tx_flags(efa_rdm_ep), 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -285,10 +313,10 @@ ssize_t efa_rdm_msg_send(struct fid_ep *ep, const void *buf, size_t len,
 		     void *desc, fi_addr_t dest_addr, void *context)
 {
 	struct iovec iov;
-	struct efa_rdm_peer *peer;
 	struct efa_rdm_ep *efa_rdm_ep;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
 	struct fi_msg msg = {0};
+	fi_addr_t shm_addr;
 	int ret;
 
 	iov.iov_base = (void *)buf;
@@ -300,16 +328,21 @@ ssize_t efa_rdm_msg_send(struct fid_ep *ep, const void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		if (desc)
-			efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
-		return fi_send(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, peer->conn->shm_fi_addr, context);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			if (desc)
+				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
+			return fi_send(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, shm_addr, context);
+		}
 	}
 
 	efa_rdm_msg_construct(&msg, &iov, &desc, 1, dest_addr, context, 0);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, 0, ofi_op_msg, efa_rdm_tx_flags(efa_rdm_ep));
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg, efa_rdm_tx_flags(efa_rdm_ep), 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -320,8 +353,8 @@ ssize_t efa_rdm_msg_senddata(struct fid_ep *ep, const void *buf, size_t len,
 	struct fi_msg msg = {0};
 	struct iovec iov;
 	struct efa_rdm_ep *efa_rdm_ep;
-	struct efa_rdm_peer *peer;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
@@ -334,17 +367,22 @@ ssize_t efa_rdm_msg_senddata(struct fid_ep *ep, const void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		if (desc)
-			efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
-		return fi_senddata(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, data, peer->conn->shm_fi_addr, context);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			if (desc)
+				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
+			return fi_senddata(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, data, shm_addr, context);
+		}
 	}
 
 	efa_rdm_msg_construct(&msg, &iov, &desc, 1, dest_addr, context, data);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, 0, ofi_op_msg,
-				    efa_rdm_tx_flags(efa_rdm_ep) | FI_REMOTE_CQ_DATA);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg,
+				    efa_rdm_tx_flags(efa_rdm_ep) | FI_REMOTE_CQ_DATA, 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -354,15 +392,19 @@ ssize_t efa_rdm_msg_inject(struct fid_ep *ep, const void *buf, size_t len,
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct fi_msg msg = {0};
 	struct iovec iov;
-	struct efa_rdm_peer *peer;
+	fi_addr_t shm_addr;
+	int ret;
 
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->base_ep.inject_msg_size);
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		return fi_inject(efa_rdm_ep->shm_ep, buf, len, peer->conn->shm_fi_addr);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			return fi_inject(efa_rdm_ep->shm_ep, buf, len, shm_addr);
+		}
 	}
 
 	iov.iov_base = (void *)buf;
@@ -370,8 +412,11 @@ ssize_t efa_rdm_msg_inject(struct fid_ep *ep, const void *buf, size_t len,
 
 	efa_rdm_msg_construct(&msg, &iov, NULL, 1, dest_addr, NULL, 0);
 
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, 0, ofi_op_msg,
-				    efa_rdm_tx_flags(efa_rdm_ep) | EFA_RDM_TXE_NO_COMPLETION | FI_INJECT);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg,
+				    efa_rdm_tx_flags(efa_rdm_ep) | FI_INJECT,
+				    EFA_RDM_TXE_NO_COMPLETION);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -382,15 +427,19 @@ ssize_t efa_rdm_msg_injectdata(struct fid_ep *ep, const void *buf,
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct fi_msg msg;
 	struct iovec iov;
-	struct efa_rdm_peer *peer;
+	fi_addr_t shm_addr;
+	int ret;
 
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->base_ep.inject_msg_size);
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		return fi_injectdata(efa_rdm_ep->shm_ep, buf, len, data, peer->conn->shm_fi_addr);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			return fi_injectdata(efa_rdm_ep->shm_ep, buf, len, data, shm_addr);
+		}
 	}
 
 	iov.iov_base = (void *)buf;
@@ -398,9 +447,12 @@ ssize_t efa_rdm_msg_injectdata(struct fid_ep *ep, const void *buf,
 
 	efa_rdm_msg_construct(&msg, &iov, NULL, 1, dest_addr, NULL, data);
 
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, 0, ofi_op_msg,
-				    efa_rdm_tx_flags(efa_rdm_ep) | EFA_RDM_TXE_NO_COMPLETION |
-				    FI_REMOTE_CQ_DATA | FI_INJECT);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, 0, ofi_op_msg,
+				    efa_rdm_tx_flags(efa_rdm_ep) |
+				    FI_REMOTE_CQ_DATA | FI_INJECT,
+				    EFA_RDM_TXE_NO_COMPLETION);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 /**
@@ -411,12 +463,12 @@ ssize_t efa_rdm_msg_tsendmsg(struct fid_ep *ep_fid, const struct fi_msg_tagged *
 			 uint64_t flags)
 {
 	struct fi_msg msg = {0};
-	struct efa_rdm_peer *peer;
 	struct efa_rdm_ep *efa_rdm_ep;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
 	struct fi_msg_tagged *shm_tmsg;
 	void **efa_desc = NULL;
 	fi_addr_t efa_addr;
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
@@ -425,27 +477,34 @@ ssize_t efa_rdm_msg_tsendmsg(struct fid_ep *ep_fid, const struct fi_msg_tagged *
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, tmsg->addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		shm_tmsg = (struct fi_msg_tagged *)tmsg;
-		if (tmsg->desc) {
-			efa_desc = tmsg->desc;
-			efa_rdm_get_desc_for_shm(tmsg->iov_count, tmsg->desc, shm_desc);
-			shm_tmsg->desc = shm_desc;
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, tmsg->addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(
+				&efa_rdm_ep->base_ep.domain->srx_lock);
+			shm_tmsg = (struct fi_msg_tagged *) tmsg;
+			if (tmsg->desc) {
+				efa_desc = tmsg->desc;
+				efa_rdm_get_desc_for_shm(tmsg->iov_count,
+							 tmsg->desc, shm_desc);
+				shm_tmsg->desc = shm_desc;
+			}
+			efa_addr = tmsg->addr;
+			shm_tmsg->addr = shm_addr;
+			ret = fi_tsendmsg(efa_rdm_ep->shm_ep, shm_tmsg, flags);
+			/* Recover the application msg */
+			if (efa_desc)
+				shm_tmsg->desc = efa_desc;
+			shm_tmsg->addr = efa_addr;
+			return ret;
 		}
-		efa_addr = tmsg->addr;
-		shm_tmsg->addr = peer->conn->shm_fi_addr;
-		ret = fi_tsendmsg(efa_rdm_ep->shm_ep, shm_tmsg, flags);
-		/* Recover the application msg */
-		if (efa_desc)
-			shm_tmsg->desc = efa_desc;
-		shm_tmsg->addr = efa_addr;
-		return ret;
 	}
 
 	efa_rdm_msg_construct(&msg, tmsg->msg_iov, tmsg->desc, tmsg->iov_count, tmsg->addr, tmsg->context, tmsg->data);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, tmsg->tag, ofi_op_tagged, flags);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tmsg->tag, ofi_op_tagged, flags, 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -455,26 +514,31 @@ ssize_t efa_rdm_msg_tsendv(struct fid_ep *ep_fid, const struct iovec *iov,
 {
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct fi_msg msg = {0};
-	struct efa_rdm_peer *peer;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
 
 	ret = efa_rdm_attempt_to_sync_memops_iov(efa_rdm_ep, (struct iovec *)iov, desc, count);
 	if (ret)
 		return ret;
 
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		if (desc)
-			efa_rdm_get_desc_for_shm(count, desc, shm_desc);
-		return fi_tsendv(efa_rdm_ep->shm_ep, iov, desc? shm_desc : NULL, count, peer->conn->shm_fi_addr, tag, context);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			if (desc)
+				efa_rdm_get_desc_for_shm(count, desc, shm_desc);
+			return fi_tsendv(efa_rdm_ep->shm_ep, iov, desc? shm_desc : NULL, count, shm_addr, tag, context);
+		}
 	}
 
 	efa_rdm_msg_construct(&msg, iov, desc, count, dest_addr, context, 0);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, tag, ofi_op_tagged, efa_rdm_tx_flags(efa_rdm_ep));
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged, efa_rdm_tx_flags(efa_rdm_ep), 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -484,9 +548,9 @@ ssize_t efa_rdm_msg_tsend(struct fid_ep *ep_fid, const void *buf, size_t len,
 {
 	struct iovec msg_iov;
 	struct fi_msg msg = {0};
-	struct efa_rdm_peer *peer;
 	struct efa_rdm_ep *efa_rdm_ep;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
@@ -498,16 +562,21 @@ ssize_t efa_rdm_msg_tsend(struct fid_ep *ep_fid, const void *buf, size_t len,
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		if (desc)
-			efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
-		return fi_tsend(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, peer->conn->shm_fi_addr, tag, context);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			if (desc)
+				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
+			return fi_tsend(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, shm_addr, tag, context);
+		}
 	}
 
 	efa_rdm_msg_construct(&msg, &msg_iov, &desc, 1, dest_addr, context, 0);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, tag, ofi_op_tagged, efa_rdm_tx_flags(efa_rdm_ep));
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged, efa_rdm_tx_flags(efa_rdm_ep), 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -518,8 +587,8 @@ ssize_t efa_rdm_msg_tsenddata(struct fid_ep *ep_fid, const void *buf, size_t len
 	struct fi_msg msg = {0};
 	struct iovec iov;
 	struct efa_rdm_ep *efa_rdm_ep;
-	struct efa_rdm_peer *peer;
 	void *shm_desc[EFA_RDM_IOV_LIMIT] = {NULL};
+	fi_addr_t shm_addr;
 	int ret;
 
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
@@ -531,17 +600,22 @@ ssize_t efa_rdm_msg_tsenddata(struct fid_ep *ep_fid, const void *buf, size_t len
 	if (ret)
 		return ret;
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		if (desc)
-			efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
-		return fi_tsenddata(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, data, peer->conn->shm_fi_addr, tag, context);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			if (desc)
+				efa_rdm_get_desc_for_shm(1, &desc, shm_desc);
+			return fi_tsenddata(efa_rdm_ep->shm_ep, buf, len, desc? shm_desc[0] : NULL, data, shm_addr, tag, context);
+		}
 	}
 
 	efa_rdm_msg_construct(&msg, &iov, &desc, 1, dest_addr, context, data);
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, tag, ofi_op_tagged,
-				    efa_rdm_tx_flags(efa_rdm_ep) | FI_REMOTE_CQ_DATA);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged,
+				    efa_rdm_tx_flags(efa_rdm_ep) | FI_REMOTE_CQ_DATA, 0);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -551,15 +625,19 @@ ssize_t efa_rdm_msg_tinject(struct fid_ep *ep_fid, const void *buf, size_t len,
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct fi_msg msg = {0};
 	struct iovec iov;
-	struct efa_rdm_peer *peer;
+	fi_addr_t shm_addr;
+	int ret;
 
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->inject_tagged_size);
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		return fi_tinject(efa_rdm_ep->shm_ep, buf, len, peer->conn->shm_fi_addr, tag);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			return fi_tinject(efa_rdm_ep->shm_ep, buf, len, shm_addr, tag);
+		}
 	}
 
 	iov.iov_base = (void *)buf;
@@ -567,8 +645,11 @@ ssize_t efa_rdm_msg_tinject(struct fid_ep *ep_fid, const void *buf, size_t len,
 
 	efa_rdm_msg_construct(&msg, &iov, NULL, 1, dest_addr, NULL, 0);
 
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, tag, ofi_op_tagged,
-				    efa_rdm_tx_flags(efa_rdm_ep) | EFA_RDM_TXE_NO_COMPLETION | FI_INJECT);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged,
+				    efa_rdm_tx_flags(efa_rdm_ep) | FI_INJECT,
+				    EFA_RDM_TXE_NO_COMPLETION);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 static
@@ -578,15 +659,19 @@ ssize_t efa_rdm_msg_tinjectdata(struct fid_ep *ep_fid, const void *buf, size_t l
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct fi_msg msg = {0};
 	struct iovec iov;
-	struct efa_rdm_peer *peer;
+	fi_addr_t shm_addr;
+	int ret;
 
 	efa_rdm_ep = container_of(ep_fid, struct efa_rdm_ep, base_ep.util_ep.ep_fid.fid);
 	assert(len <= efa_rdm_ep->inject_tagged_size);
 
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, dest_addr);
-	assert(peer);
-	if (peer->is_local && efa_rdm_ep->shm_ep) {
-		return fi_tinjectdata(efa_rdm_ep->shm_ep, buf, len, data, peer->conn->shm_fi_addr, tag);
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	if (efa_rdm_ep->shm_ep) {
+		shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, dest_addr);
+		if (shm_addr != FI_ADDR_NOTAVAIL) {
+			ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+			return fi_tinjectdata(efa_rdm_ep->shm_ep, buf, len, data, shm_addr, tag);
+		}
 	}
 
 	iov.iov_base = (void *)buf;
@@ -594,70 +679,17 @@ ssize_t efa_rdm_msg_tinjectdata(struct fid_ep *ep_fid, const void *buf, size_t l
 
 	efa_rdm_msg_construct(&msg, &iov, NULL, 1, dest_addr, NULL, data);
 
-	return efa_rdm_msg_generic_send(efa_rdm_ep, peer, &msg, tag, ofi_op_tagged,
-				    efa_rdm_tx_flags(efa_rdm_ep) | EFA_RDM_TXE_NO_COMPLETION |
-				    FI_REMOTE_CQ_DATA | FI_INJECT);
+	ret = efa_rdm_msg_generic_send(efa_rdm_ep, &msg, tag, ofi_op_tagged,
+				    efa_rdm_tx_flags(efa_rdm_ep) |
+				    FI_REMOTE_CQ_DATA | FI_INJECT,
+				    EFA_RDM_TXE_NO_COMPLETION);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	return ret;
 }
 
 /**
  *  Receive functions
  */
-
-/**
- * @brief allocate an rxe for a fi_msg in the zero-copy path.
- *        This function is used by two sided operation only.
- *
- * @param[in] ep	end point
- * @param[in] msg	fi_msg contains iov,iov_count,context for ths operation
- * @param[in] op	operation type (ofi_op_msg or ofi_op_tagged)
- * @param[in] flags	flags application used to call fi_recv/fi_trecv functions
- * @param[in] tag	tag (used only if op is ofi_op_tagged)
- * @param[in] ignore	ignore mask (used only if op is ofi_op_tagged)
- * @return		if allocation succeeded, return pointer to rxe
- * 			if allocation failed, return NULL
- */
-struct efa_rdm_ope *efa_rdm_msg_alloc_rxe_zcpy(struct efa_rdm_ep *ep,
-					    const struct fi_msg *msg,
-					    uint32_t op, uint64_t flags,
-					    uint64_t tag, uint64_t ignore)
-{
-	struct efa_rdm_ope *rxe;
-	struct efa_rdm_peer *peer;
-
-	if (ep->base_ep.util_ep.caps & FI_DIRECTED_RECV)
-		peer = efa_rdm_ep_get_peer(ep, msg->addr);
-	else
-		peer = NULL;
-
-	rxe = efa_rdm_ep_alloc_rxe(ep, peer, op);
-	if (!rxe)
-		return NULL;
-
-	rxe->fi_flags = flags;
-	if (op == ofi_op_tagged) {
-		rxe->tag = tag;
-		rxe->cq_entry.tag = tag;
-		rxe->ignore = ignore;
-	}
-
-	/* Handle case where we're allocating an unexpected rxe */
-	rxe->iov_count = msg->iov_count;
-	if (rxe->iov_count) {
-		assert(msg->msg_iov);
-		memcpy(rxe->iov, msg->msg_iov, sizeof(*rxe->iov) * msg->iov_count);
-		rxe->cq_entry.len = ofi_total_iov_len(rxe->iov, rxe->iov_count);
-		rxe->cq_entry.buf = msg->msg_iov[0].iov_base;
-	}
-
-	if (msg->desc)
-		memcpy(&rxe->desc[0], msg->desc, sizeof(*msg->desc) * msg->iov_count);
-	else
-		memset(&rxe->desc[0], 0, sizeof(rxe->desc));
-
-	rxe->cq_entry.op_context = msg->context;
-
-	return rxe;
-}
 
 /**
  * @brief allocate a RX entry for an unexpected RTM
@@ -922,8 +954,6 @@ ssize_t efa_rdm_msg_generic_recv(struct efa_rdm_ep *ep, const struct fi_msg *msg
 			     uint64_t flags)
 {
 	ssize_t ret = 0;
-	struct efa_rdm_ope *rxe;
-	struct util_srx_ctx *srx_ctx;
 
 	assert(msg->iov_count <= ep->base_ep.info->rx_attr->iov_limit);
 
@@ -941,22 +971,7 @@ ssize_t efa_rdm_msg_generic_recv(struct efa_rdm_ep *ep, const struct fi_msg *msg
 	if (ret)
 		return ret;
 
-	if (ep->use_zcpy_rx) {
-		srx_ctx = efa_rdm_ep_get_peer_srx_ctx(ep);
-		ofi_genlock_lock(srx_ctx->lock);
-		rxe = efa_rdm_msg_alloc_rxe_zcpy(ep, msg, op, flags, tag, ignore);
-		if (OFI_UNLIKELY(!rxe)) {
-			ret = -FI_EAGAIN;
-			ofi_genlock_unlock(srx_ctx->lock);
-			goto out;
-		}
-
-		ret = efa_rdm_ep_post_user_recv_buf(ep, rxe, flags);
-		if (OFI_UNLIKELY(ret))
-			efa_rdm_rxe_release(rxe);
-
-		ofi_genlock_unlock(srx_ctx->lock);
-	} else if (op == ofi_op_tagged) {
+	if (op == ofi_op_tagged) {
 		ret = util_srx_generic_trecv(ep->peer_srx_ep, msg->msg_iov, msg->desc,
 					     msg->iov_count, msg->addr, msg->context,
 					     tag, ignore, flags);
@@ -965,7 +980,6 @@ ssize_t efa_rdm_msg_generic_recv(struct efa_rdm_ep *ep, const struct fi_msg *msg
 				            msg->iov_count, msg->addr, msg->context, flags);
 	}
 
-out:
 	efa_perfset_end(ep, perf_efa_recv);
 	return ret;
 }

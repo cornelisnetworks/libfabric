@@ -78,63 +78,7 @@ void test_av_insert_duplicate_gid(struct efa_resource **state)
 	assert_int_not_equal(addr1, addr2);
 }
 
-void test_efa_ah_cnt_one_av(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-	struct efa_ep_addr raw_addr = {0};
-	size_t raw_addr_len = sizeof(struct efa_ep_addr);
-	fi_addr_t addr1, addr2;
-	int err, num_addr;
-	struct efa_domain *efa_domain;
-	struct efa_ah *efa_ah = NULL;
-
-	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
-
-	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
-
-	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
-	assert_int_equal(err, 0);
-
-	/* So far we should only have 1 ah from ep self ah, and its refcnt is 1 */
-	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 1);
-	HASH_FIND(hh, efa_domain->ah_map, raw_addr.raw, EFA_GID_LEN, efa_ah);
-	assert_non_null(efa_ah);
-	assert_int_equal(efa_ah->explicit_refcnt, 1);
-	assert_int_equal(efa_ah->implicit_refcnt, 0);
-
-	raw_addr.qpn = 1;
-	raw_addr.qkey = 0x1234;
-
-	num_addr = fi_av_insert(resource->av, &raw_addr, 1, &addr1, 0 /* flags */, NULL /* context */);
-	assert_int_equal(num_addr, 1);
-
-	raw_addr.qpn = 2;
-	raw_addr.qkey = 0x5678;
-	num_addr = fi_av_insert(resource->av, &raw_addr, 1, &addr2, 0 /* flags */, NULL /* context */);
-	assert_int_equal(num_addr, 1);
-	assert_int_not_equal(addr1, addr2);
-
-	/* So far we should still have 1 ah, and its refcnt is 3 (plus the 2 av entries) */
-	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 1);
-	assert_int_equal(efa_ah->explicit_refcnt, 3);
-	assert_int_equal(efa_ah->implicit_refcnt, 0);
-
-	/* ah refcnt should be decremented to 1 after av entry removals */
-	assert_int_equal(fi_av_remove(resource->av, &addr1, 1, 0), 0);
-	assert_int_equal(fi_av_remove(resource->av, &addr2, 1, 0), 0);
-
-	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 1);
-	assert_int_equal(efa_ah->explicit_refcnt, 1);
-	assert_int_equal(efa_ah->implicit_refcnt, 0);
-
-	/* ah map should be empty now after closing ep which destroys the self ah */
-	assert_int_equal(fi_close(&resource->ep->fid), 0);
-	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 0);
-	/* Reset to NULL to avoid test reaper closing again */
-	resource->ep = NULL;
-}
-
-void test_efa_ah_cnt_multi_av(struct efa_resource **state)
+static void efa_ah_cnt_av_impl(struct efa_resource **state, bool efa_fabric, bool multi_av)
 {
 	struct efa_resource *resource = *state;
 	struct efa_ep_addr raw_addr = {0};
@@ -144,69 +88,103 @@ void test_efa_ah_cnt_multi_av(struct efa_resource **state)
 	struct efa_domain *efa_domain;
 	struct efa_ah *efa_ah = NULL;
 	struct fi_av_attr av_attr = {0};
-	struct fid_av *av1, *av2;
-	struct fid_ep *ep1, *ep2;
+	struct fid_av *av1 = NULL, *av2 = NULL;
 
-	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, efa_fabric ? EFA_FABRIC_NAME : EFA_DIRECT_FABRIC_NAME);
 
 	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
 
 	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
 	assert_int_equal(err, 0);
 
-	/* So far we should only have 1 ah from ep self ah, and its refcnt is 1 */
-	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 1);
+	/* So far we should only have 1 ah from ep self ah, and its refcnt is 1 for efa fabric */
+	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), efa_fabric ? 1 : 0);
 	HASH_FIND(hh, efa_domain->ah_map, raw_addr.raw, EFA_GID_LEN, efa_ah);
-	assert_non_null(efa_ah);
-	assert_int_equal(efa_ah->explicit_refcnt, 1);
-	assert_int_equal(efa_ah->implicit_refcnt, 0);
+	if (efa_fabric) {
+		assert_non_null(efa_ah);
+		assert_int_equal(efa_ah->explicit_refcnt, efa_fabric ? 1 : 0);
+		assert_int_equal(efa_ah->implicit_refcnt, 0);
+	} else {
+		assert_null(efa_ah);
+	}
 
-
-	/* We open 2 avs with the same domain (PD) so they should share same AH given the same GID */
-	assert_int_equal(fi_av_open(resource->domain, &av_attr, &av1, NULL), 0);
-	assert_int_equal(fi_av_open(resource->domain, &av_attr, &av2, NULL), 0);
-
-	/* Due to the current restriction in efa provider, we have to bind av to ep before inserting av entry */
-	/* These eps will not create self ah as they are not enabled */
-	assert_int_equal(fi_endpoint(resource->domain, resource->info, &ep1, NULL), 0);
-	assert_int_equal(fi_endpoint(resource->domain, resource->info, &ep2, NULL), 0);
-
-	assert_int_equal(fi_ep_bind(ep1, &av1->fid, 0), 0);
-	assert_int_equal(fi_ep_bind(ep2, &av2->fid, 0), 0);
+	if (multi_av) {
+		/* We open 2 avs with the same domain (PD) so they should share same AH given the same GID */
+		assert_int_equal(fi_av_open(resource->domain, &av_attr, &av1, NULL), 0);
+		assert_int_equal(fi_av_open(resource->domain, &av_attr, &av2, NULL), 0);
+	}
 
 	raw_addr.qpn = 1;
 	raw_addr.qkey = 0x1234;
 
-	num_addr = fi_av_insert(av1, &raw_addr, 1, &addr1, 0 /* flags */, NULL /* context */);
+	num_addr = fi_av_insert(multi_av ? av1 : resource->av, &raw_addr, 1, &addr1, 0, NULL);
 	assert_int_equal(num_addr, 1);
 
 	raw_addr.qpn = 2;
 	raw_addr.qkey = 0x5678;
-	num_addr = fi_av_insert(av2, &raw_addr, 1, &addr2, 0 /* flags */, NULL /* context */);
+	num_addr = fi_av_insert(multi_av ? av2 : resource->av, &raw_addr, 1, &addr2, 0, NULL);
 	assert_int_equal(num_addr, 1);
-	/* They should be as equal as 0 they are in different avs */
-	assert_int_equal(addr1, addr2);
 
-	/* So far we should still have 1 ah, and its refcnt is 3 (plus the 2 av entries) */
+	if (multi_av) {
+		/* They should be equal as 0 since they are in different avs */
+		assert_int_equal(addr1, addr2);
+	} else {
+		assert_int_not_equal(addr1, addr2);
+	}
+
+	if (!efa_fabric) {
+		HASH_FIND(hh, efa_domain->ah_map, raw_addr.raw, EFA_GID_LEN, efa_ah);
+		assert_non_null(efa_ah);
+	}
+
+	/* So far we should still have 1 ah, and its refcnt is 3 for efa fabric (including self AH) and 2 for efa-direct fabric) */
 	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 1);
-	assert_int_equal(efa_ah->explicit_refcnt, 3);
+	assert_int_equal(efa_ah->explicit_refcnt, efa_fabric ? 3 : 2);
 	assert_int_equal(efa_ah->implicit_refcnt, 0);
 
-	/* ah refcnt should be decremented to 1 after av close */
-	assert_int_equal(fi_close(&ep1->fid), 0);
-	assert_int_equal(fi_close(&ep2->fid), 0);
-	assert_int_equal(fi_close(&av1->fid), 0);
-	assert_int_equal(fi_close(&av2->fid), 0);
+	if (multi_av) {
+		/* ah refcnt should be decremented to 1 after av close */
+		assert_int_equal(fi_close(&av1->fid), 0);
+		assert_int_equal(fi_close(&av2->fid), 0);
+	} else {
+		/* ah refcnt should be decremented to 1 after av entry removals */
+		assert_int_equal(fi_av_remove(resource->av, &addr1, 1, 0), 0);
+		assert_int_equal(fi_av_remove(resource->av, &addr2, 1, 0), 0);
+	}
 
-	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 1);
-	assert_int_equal(efa_ah->explicit_refcnt, 1);
-	assert_int_equal(efa_ah->implicit_refcnt, 0);
+	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), efa_fabric ? 1 : 0);
+	if (efa_fabric) {
+		/* efa_ah is still alive because self-AH holds a reference */
+		assert_int_equal(efa_ah->explicit_refcnt, 1);
+		assert_int_equal(efa_ah->implicit_refcnt, 0);
+	}
+	/* else: efa_ah has been freed, do not dereference */
 
-	/* ah map should be empty now after closing ep which destroys the self ah */
+	/* ah map should be empty now after closing ep which destroys the self ah for efa fabric */
 	assert_int_equal(fi_close(&resource->ep->fid), 0);
 	assert_int_equal(HASH_CNT(hh, efa_domain->ah_map), 0);
 	/* Reset to NULL to avoid test reaper closing again */
 	resource->ep = NULL;
+}
+
+void test_efa_ah_cnt_one_av_efa(struct efa_resource **state)
+{
+	efa_ah_cnt_av_impl(state, true, false);
+}
+
+void test_efa_ah_cnt_one_av_efa_direct(struct efa_resource **state)
+{
+	efa_ah_cnt_av_impl(state, false, false);
+}
+
+void test_efa_ah_cnt_multi_av_efa(struct efa_resource **state)
+{
+	efa_ah_cnt_av_impl(state, true, true);
+}
+
+void test_efa_ah_cnt_multi_av_efa_direct(struct efa_resource **state)
+{
+	efa_ah_cnt_av_impl(state, false, true);
 }
 
 /**
@@ -351,7 +329,85 @@ void test_av_reinsertion(struct efa_resource **state)
 }
 
 /**
- * @brief Generate a peer with random QPN and QKEY and insert it into the implicit AV
+ * @brief Insert two peers that collide on (AHN, QPN) but differ in QKEY, then
+ * remove the first-inserted peer before the second. This reproduces the bug
+ * in efa_av_reverse_av_remove() where the code blindly deletes the
+ * cur_reverse_av entry matching (ahn, qpn) even though that entry belongs to
+ * a different (newer) conn. Removing the surviving second peer afterwards
+ * then hits a NULL prv_reverse_av_entry and SEGVs.
+ *
+ * @param[in]	state	struct efa_resource that is managed by the framework
+ */
+void test_av_reverse_av_remove_qpn_collision(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_ep_addr raw_addr;
+	size_t raw_addr_len = sizeof(struct efa_ep_addr);
+	fi_addr_t fi_addr1, fi_addr2;
+	struct efa_av *av;
+	struct efa_rdm_ep *efa_rdm_ep;
+	uint32_t ahn;
+	int err;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(err, 0);
+
+	av = container_of(resource->av, struct efa_av, util_av.av_fid);
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep,
+				  base_ep.util_ep.ep_fid);
+	ahn = efa_rdm_ep->self_ah->ahn;
+
+	/* Insert peer1: same GID as self, qpn=100, qkey=0xAAAA */
+	raw_addr.qpn = 100;
+	raw_addr.qkey = 0xAAAA;
+	err = fi_av_insert(resource->av, &raw_addr, 1, &fi_addr1, 0, NULL);
+	assert_int_equal(err, 1);
+	test_av_verify_av_hash_cnt(av, 1, 0, 0, 0);
+	/* cur_reverse_av (ahn, 100) -> conn1 (fi_addr1) */
+	assert_int_equal(efa_av_reverse_lookup_rdm(av, ahn, 100, NULL),
+			 fi_addr1);
+
+	/* Insert peer2: same GID and qpn, different qkey. This pushes peer1's
+	 * reverse-AV entry from cur_reverse_av into prv_reverse_av. */
+	raw_addr.qpn = 100;
+	raw_addr.qkey = 0xBBBB;
+	err = fi_av_insert(resource->av, &raw_addr, 1, &fi_addr2, 0, NULL);
+	assert_int_equal(err, 1);
+	assert_int_not_equal(fi_addr1, fi_addr2);
+	test_av_verify_av_hash_cnt(av, 1, 1, 0, 0);
+	/* cur_reverse_av (ahn, 100) now points to conn2 (fi_addr2); peer1 is
+	 * in prv_reverse_av keyed by its own qkey. */
+	assert_int_equal(efa_av_reverse_lookup_rdm(av, ahn, 100, NULL),
+			 fi_addr2);
+
+	/* Remove peer1 first. Without the fix this would incorrectly delete
+	 * peer2's cur_reverse_av entry and leave peer1's prv entry orphaned. */
+	err = fi_av_remove(resource->av, &fi_addr1, 1, 0);
+	assert_int_equal(err, 0);
+	/* peer1's prv entry is gone; peer2's cur entry must still be intact. */
+	test_av_verify_av_hash_cnt(av, 1, 0, 0, 0);
+	assert_int_equal(efa_av_reverse_lookup_rdm(av, ahn, 100, NULL),
+			 fi_addr2);
+
+	/* Remove peer2. Without the fix this hits a NULL prv_reverse_av_entry
+	 * in efa_av_reverse_av_remove() -> SEGV / assertion failure. */
+	err = fi_av_remove(resource->av, &fi_addr2, 1, 0);
+	assert_int_equal(err, 0);
+	test_av_verify_av_hash_cnt(av, 0, 0, 0, 0);
+	assert_int_equal(efa_av_reverse_lookup_rdm(av, ahn, 100, NULL),
+			 FI_ADDR_NOTAVAIL);
+}
+
+/**
+ * @brief Generate a peer with a unique QPN and a random QKEY and insert it
+ *        into the implicit AV
+ *
+ * The QPN is drawn from a static monotonic counter so every peer minted by
+ * this helper has a distinct (ahn, qpn) key in the reverse AV. Callers rely
+ * on this uniqueness to exercise LRU ordering and eviction behavior without
+ * tripping over the provider's QPN-collision path.
  *
  * @param[in]	state	struct efa_resource that is managed by the framework
  */
@@ -372,9 +428,10 @@ static struct efa_rdm_peer *test_av_get_peer_from_implicit_av(struct efa_resourc
 	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
 	assert_int_equal(err, 0);
 
-	raw_addr.qpn = rand();
+	static uint16_t next_qpn = 0;
+	raw_addr.qpn = next_qpn++;
 	raw_addr.qkey = rand();
-	ahn = efa_rdm_ep->base_ep.self_ah->ahn;
+	ahn = efa_rdm_ep->self_ah->ahn;
 
 	/* Manually insert into implicit AV */
 	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
@@ -456,7 +513,7 @@ void test_av_implicit_to_explicit(struct efa_resource **state)
 	assert_int_equal(peer->conn->implicit_fi_addr, FI_ADDR_NOTAVAIL);
 	assert_int_equal(efa_is_same_addr(&raw_addr, peer->conn->ep_addr), 1);
 
-	ahn = efa_rdm_ep->base_ep.self_ah->ahn;
+	ahn = efa_rdm_ep->self_ah->ahn;
 	test_addr = efa_av_reverse_lookup_rdm(av, ahn, raw_addr.qpn, NULL);
 	assert_int_equal(test_addr, explicit_fi_addr);
 
@@ -534,7 +591,7 @@ void test_av_implicit_av_lru_insertion(struct efa_resource **state)
 
 
 	/* Access peer0 through the CQ read path */
-	ahn = efa_rdm_ep->base_ep.self_ah->ahn;
+	ahn = efa_rdm_ep->self_ah->ahn;
 	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
 	implicit_fi_addr = efa_av_reverse_lookup_rdm_implicit(
 		av, ahn, peer0->conn->ep_addr->qpn, NULL);
@@ -545,7 +602,7 @@ void test_av_implicit_av_lru_insertion(struct efa_resource **state)
 	test_av_implicit_av_verify_lru_list_first_last_elements(av, peer1->conn, peer0->conn);
 
 	/* Access peer2 through the CQ read path */
-	ahn = efa_rdm_ep->base_ep.self_ah->ahn;
+	ahn = efa_rdm_ep->self_ah->ahn;
 	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
 	implicit_fi_addr = efa_av_reverse_lookup_rdm_implicit(
 		av, ahn, peer2->conn->ep_addr->qpn, NULL);
@@ -618,7 +675,7 @@ void test_av_implicit_av_lru_eviction(struct efa_resource **state)
 	test_av_implicit_av_verify_lru_list_first_last_elements(av, peer0->conn, peer1->conn);
 
 	/* Access peer0 through the CQ read path */
-	ahn = efa_rdm_ep->base_ep.self_ah->ahn;
+	ahn = efa_rdm_ep->self_ah->ahn;
 	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
 	implicit_fi_addr = efa_av_reverse_lookup_rdm_implicit(
 		av, ahn, peer0->conn->ep_addr->qpn, NULL);
@@ -790,6 +847,8 @@ void test_ah_lru_eviction_impl(bool explicit)
 	}
 
 	if (num_nic < 2) {
+		fi_freeinfo(info);
+		fi_freeinfo(hints);
 		return;
 	}
 
@@ -874,7 +933,7 @@ void test_ah_lru_eviction_impl(bool explicit)
 	}
 
 	for (int i = 0; i < 2; i++) {
-		efa_rdm_ep[i]->base_ep.self_ah = NULL;
+		efa_rdm_ep[i]->self_ah = NULL;
 		fi_close(&ep_fid[i]->fid);
 		fi_close(&cq_fid[i]->fid);
 		fi_close(&av_fid[i]->fid);

@@ -12,12 +12,15 @@
 #include "efa_rdm_tracepoint.h"
 #include "efa_rdm_pke_req.h"
 #include "efa_rdm_pkt_type.h"
+#include "efa_rdm_mr.h"
+#include "efa_rdm_cq.h"
 
 void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 			   struct efa_rdm_ep *ep,
 			   struct efa_rdm_peer *peer,
 			   const struct fi_msg *msg,
-			   uint32_t op, uint64_t flags)
+			   uint32_t op, uint64_t fi_flags,
+			   uint32_t internal_flags)
 {
 	uint64_t tx_op_flags;
 
@@ -32,7 +35,7 @@ void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 		dlist_insert_tail(&txe->peer_entry, &txe->peer->txe_list);
 	}
 
-	txe->internal_flags = 0;
+	txe->internal_flags = internal_flags;
 	txe->bytes_received = 0;
 	txe->bytes_copied = 0;
 	txe->bytes_acked = 0;
@@ -46,30 +49,17 @@ void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 
 	memcpy(txe->iov, msg->msg_iov, sizeof(struct iovec) * msg->iov_count);
 	memset(txe->mr, 0, sizeof(*txe->mr) * msg->iov_count);
-	if (msg->desc)
+	if (msg->desc) {
 		memcpy(txe->desc, msg->desc, sizeof(*msg->desc) * msg->iov_count);
-	else
-		memset(txe->desc, 0, sizeof(txe->desc));
+	} else {
+		memset(txe->desc, 0, sizeof(*txe->desc) * msg->iov_count);
+	}
 
 	/* cq_entry on completion */
 	txe->cq_entry.op_context = msg->context;
 	txe->cq_entry.data = msg->data;
 	txe->cq_entry.len = ofi_total_iov_len(txe->iov, txe->iov_count);
 	txe->cq_entry.buf = OFI_LIKELY(txe->cq_entry.len > 0) ? txe->iov[0].iov_base : NULL;
-
-	/*
-	 * txe->iov_count is 0 only when posting handshake packets
-	 *
-	 * It's a bit silly to allocate extra header before the contents
-	 * of the handshake packet and then consume that here. So instead
-	 * just don't consume the prefix header if iov_count is 0.
-	 *
-	 * A send or RMA or atomic call from the application cannot have
-	 * iov_count 0, so this is safe.
-	 */
-	if (txe->iov_count && ep->base_ep.info->mode & FI_MSG_PREFIX) {
-		ofi_consume_iov_desc(txe->iov, txe->desc, &txe->iov_count, ep->msg_prefix_size);
-	}
 	txe->total_len = ofi_total_iov_len(txe->iov, txe->iov_count);
 
 	/* set flags */
@@ -78,7 +68,7 @@ void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 	tx_op_flags = ep->base_ep.util_ep.tx_op_flags;
 	if (ep->base_ep.util_ep.tx_msg_flags == 0)
 		tx_op_flags &= ~FI_COMPLETION;
-	txe->fi_flags = flags | tx_op_flags;
+	txe->fi_flags = fi_flags | tx_op_flags;
 	txe->bytes_runt = 0;
 	dlist_init(&txe->entry);
 
@@ -106,6 +96,10 @@ void efa_rdm_txe_construct(struct efa_rdm_ope *txe,
 		EFA_WARN(FI_LOG_CQ, "invalid operation type\n");
 		assert(0);
 	}
+
+	efa_domain_ope_list_lock(efa_rdm_ep_domain(ep));
+	dlist_insert_tail(&txe->ep_entry, &ep->txe_list);
+	efa_domain_ope_list_unlock(efa_rdm_ep_domain(ep));
 }
 
 void efa_rdm_txe_release(struct efa_rdm_ope *txe)
@@ -131,14 +125,19 @@ void efa_rdm_txe_release(struct efa_rdm_ope *txe)
 		}
 	}
 
+	efa_domain_ope_list_lock(efa_rdm_ep_domain(txe->ep));
 	dlist_remove(&txe->ep_entry);
+	efa_domain_ope_list_unlock(efa_rdm_ep_domain(txe->ep));
 
 	/**
 	 * Make sure the entry is removed
 	 * from ope_longcts_list when the ope
 	 * is released for whatever reasons.
+	 * Skip removal if receipt was already processed
+	 * (which would have already removed it from the list).
 	 */
-	if (txe->state == EFA_RDM_OPE_SEND)
+	if (txe->state == EFA_RDM_OPE_SEND && 
+	    !(txe->internal_flags & EFA_RDM_TXE_RECEIPT_RECEIVED))
 		dlist_remove(&txe->entry);
 
 	dlist_foreach_container_safe(&txe->queued_pkts,
@@ -173,7 +172,9 @@ void efa_rdm_rxe_release_internal(struct efa_rdm_ope *rxe)
 	if (rxe->peer)
 		dlist_remove(&rxe->peer_entry);
 
+	efa_domain_ope_list_lock(efa_rdm_ep_domain(rxe->ep));
 	dlist_remove(&rxe->ep_entry);
+	efa_domain_ope_list_unlock(efa_rdm_ep_domain(rxe->ep));
 
 	/**
 	 * Make sure the entry is removed
@@ -306,7 +307,7 @@ void efa_rdm_ope_try_fill_desc(struct efa_rdm_ope *ope, int mr_iov_start, uint64
 				 ope->iov[i].iov_base, ope->iov[i].iov_len, access);
 
 		domain = efa_rdm_ep_domain(ope->ep);
-		err = domain->internal_buf_mr_regv(
+		err = efa_rdm_mr_cache_regv(
 			&domain->util_domain.domain_fid, ope->iov + i, 1,
 			access, 0, 0, 0, &ope->mr[i], NULL);
 
@@ -463,25 +464,22 @@ size_t efa_rdm_txe_max_req_data_capacity(struct efa_rdm_ep *ep, struct efa_rdm_o
  * On success, return 0
  * If there is not enough available packet entry in TX packet pool, return -FI_EAGAIN
  */
-ssize_t efa_rdm_ope_prepare_to_post_send(struct efa_rdm_ope *ope,
-					 int pkt_type,
-					 int *pkt_entry_cnt,
-					 int *pkt_entry_data_size_vec)
+ssize_t efa_rdm_ope_prepare_to_post_send(struct efa_rdm_ope *ope, int pkt_type,
+					 size_t *pkt_entry_cnt,
+					 size_t *pkt_entry_data_size_vec)
 {
 	struct efa_rdm_ep *ep;
 	size_t total_pkt_entry_data_size; /* total number of bytes send via packet entry's payload */
 	size_t single_pkt_entry_data_size;
 	size_t single_pkt_entry_max_data_size;
 	int i, memory_alignment, remainder, iface;
-	int available_tx_pkts;
+	size_t available_tx_pkts;
 
 	ep = ope->ep;
 	assert(ep->efa_max_outstanding_tx_ops >=
 	       ep->efa_outstanding_tx_ops + ep->efa_rnr_queued_pkt_cnt);
 
-	available_tx_pkts = ep->efa_max_outstanding_tx_ops
-		- ep->efa_outstanding_tx_ops
-		- ep->efa_rnr_queued_pkt_cnt;
+	available_tx_pkts = efa_rdm_ep_get_available_tx_pkts(ep);
 
 	if (available_tx_pkts == 0)
 		return -FI_EAGAIN;
@@ -491,7 +489,7 @@ ssize_t efa_rdm_ope_prepare_to_post_send(struct efa_rdm_ope *ope,
 		*pkt_entry_cnt = (ope->window - 1) / ope->ep->max_data_payload_size + 1;
 		if (*pkt_entry_cnt > available_tx_pkts)
 			*pkt_entry_cnt = available_tx_pkts;
-		assert(*pkt_entry_cnt > 0 && *pkt_entry_cnt <= EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND);
+		assert(*pkt_entry_cnt > 0 && *pkt_entry_cnt <= efa_base_ep_get_tx_pool_size(&ope->ep->base_ep));
 		for (i = 0; i < *pkt_entry_cnt - 1; ++i)
 			pkt_entry_data_size_vec[i] = ope->ep->max_data_payload_size;
 
@@ -511,7 +509,7 @@ ssize_t efa_rdm_ope_prepare_to_post_send(struct efa_rdm_ope *ope,
 		single_pkt_entry_max_data_size = efa_rdm_txe_max_req_data_capacity(ep, ope, pkt_type);
 		assert(single_pkt_entry_max_data_size);
 
-		iface = ope->desc[0] ? ((struct efa_mr*) ope->desc[0])->peer.iface : FI_HMEM_SYSTEM;
+		iface = ope->desc[0] ? ((struct efa_mr*) ope->desc[0])->iface : FI_HMEM_SYSTEM;
 		memory_alignment = efa_rdm_ep_get_memory_alignment(ep, iface);
 
 		*pkt_entry_cnt = (total_pkt_entry_data_size - 1) / single_pkt_entry_max_data_size + 1;
@@ -583,7 +581,6 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	struct util_cq *util_cq;
 	struct dlist_entry *tmp;
 	struct efa_rdm_pke *pkt_entry;
-	int write_cq_err;
 	char err_msg[EFA_ERROR_MSG_BUFFER_LENGTH] = {0};
 
 	assert(rxe->type == EFA_RDM_RXE);
@@ -654,6 +651,8 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 			? (const char *) err_entry.err_data
 			: efa_strerror(err_entry.prov_errno),
 		 err_entry.prov_errno);
+	efa_show_help(err_entry.prov_errno);
+
 	/*
 	 * TODO: We can't free the rxe as we may receive additional
 	 * packets for this entry. Add ref counting so the rxe can safely
@@ -668,7 +667,6 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 				? (const char *) err_entry.err_data
 				: efa_strerror(err_entry.prov_errno),
 		 	err_entry.prov_errno);
-		efa_show_help(err_entry.prov_errno);
 
 		EFA_WARN(FI_LOG_CQ,
 			"Writing eq error for rxe from internal operations\n");
@@ -677,20 +675,7 @@ void efa_rdm_rxe_handle_error(struct efa_rdm_ope *rxe, int err, int prov_errno)
 	}
 
 	efa_cntr_report_error(&ep->base_ep.util_ep, err_entry.flags);
-	write_cq_err = ofi_cq_write_error(util_cq, &err_entry);
-	if (write_cq_err) {
-		EFA_WARN(FI_LOG_CQ, "Failed to write CQ error entry for rxe err: %d, message: %s (%d)\n",
-			err_entry.err,
-			err_entry.err_data
-				? (const char *) err_entry.err_data
-				: efa_strerror(err_entry.prov_errno),
-		 	err_entry.prov_errno);
-		efa_show_help(err_entry.prov_errno);
-
-		EFA_WARN(FI_LOG_CQ,
-			"Error writing error cq entry when handling RX error\n");
-		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
-	}
+	efa_rdm_cq_write_error(&ep->base_ep, util_cq, &err_entry, "RXE");
 }
 
 /**
@@ -722,7 +707,6 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	struct util_cq *util_cq;
 	struct dlist_entry *tmp;
 	struct efa_rdm_pke *pkt_entry;
-	int write_cq_err;
 	char err_msg[EFA_ERROR_MSG_BUFFER_LENGTH] = {0};
 
 	ep = txe->ep;
@@ -737,7 +721,8 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 	case EFA_RDM_TXE_REQ:
 		break;
 	case EFA_RDM_OPE_SEND:
-		dlist_remove(&txe->entry);
+		if (!(txe->internal_flags & EFA_RDM_TXE_RECEIPT_RECEIVED))
+			dlist_remove(&txe->entry);
 		break;
 	case EFA_RDM_OPE_ERR:
 		/* Already progressed, no-op */
@@ -778,6 +763,7 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 			? (const char *) err_entry.err_data
 			: efa_strerror(err_entry.prov_errno),
 		err_entry.prov_errno);
+	efa_show_help(err_entry.prov_errno);
 
 	/*
 	 * TODO: We can't free the txe as we may receive a control packet
@@ -794,30 +780,43 @@ void efa_rdm_txe_handle_error(struct efa_rdm_ope *txe, int err, int prov_errno)
 				: efa_strerror(err_entry.prov_errno),
 			err_entry.prov_errno);
 
-		efa_show_help(err_entry.prov_errno);
-
 		EFA_WARN(FI_LOG_CQ,
 			"Writing eq error for txe from internal operations\n");
 		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
 		return;
 	}
 
+	/*
+	 * When the op was reported as failed to the caller synchronously
+	 * (via the return value of fi_write/fi_read after a partial
+	 * multi-segment post failure), EFA_RDM_TXE_NO_COMPLETION is set
+	 * on the txe to suppress the deferred CQ/counter report for the
+	 * in-flight segment's later completion. Honor that here in the
+	 * async error path too, so the app does not see a duplicate
+	 * error report.
+	 *
+	 * fi_inject/fi_tinject/fi_inject_write/fi_inject_writedata/
+	 * fi_inject_atomic also set EFA_RDM_TXE_NO_COMPLETION (success
+	 * CQ is suppressed per inject semantics), but per the libfabric
+	 * man page fi_inject MUST still report an error CQ if the async
+	 * completion fails. Exclude inject ops from this suppression by
+	 * checking FI_INJECT in fi_flags.
+	 *
+	 * This FI_INJECT discriminator is safe because inject ops are
+	 * bounded by efa_rdm_ep->base_ep.inject_rma_size (and for msg
+	 * inject, inject_size) and always fit in a single packet, so the
+	 * partial-post double-free scenario in efa_rdm_rma_generic_writemsg
+	 * / efa_rdm_rma_generic_readmsg cannot arise for an inject txe.
+	 * A txe that has both FI_INJECT and NO_COMPLETION set is therefore
+	 * always an inject op that needs the error CQ, never a partial-
+	 * post op that needs to be suppressed.
+	 */
+	if ((txe->internal_flags & EFA_RDM_TXE_NO_COMPLETION) &&
+	    !(txe->fi_flags & FI_INJECT))
+		return;
+
 	efa_cntr_report_error(&ep->base_ep.util_ep, txe->cq_entry.flags);
-	write_cq_err = ofi_cq_write_error(util_cq, &err_entry);
-	if (write_cq_err) {
-		EFA_WARN(FI_LOG_CQ, "Failed to write CQ error entry for txe err: %d, message: %s (%d)\n",
-			err_entry.err,
-			err_entry.err_data
-				? (const char *) err_entry.err_data
-				: efa_strerror(err_entry.prov_errno),
-			err_entry.prov_errno);
-
-		efa_show_help(err_entry.prov_errno);
-
-		EFA_WARN(FI_LOG_CQ,
-			"Error writing error cq entry when handling TX error\n");
-		efa_base_ep_write_eq_error(&ep->base_ep, err, prov_errno);
-	}
+	efa_rdm_cq_write_error(&ep->base_ep, util_cq, &err_entry, "TXE");
 }
 
 /**
@@ -872,7 +871,7 @@ void efa_rdm_rxe_report_completion(struct efa_rdm_ope *rxe)
 			return;
 		}
 
-		rxe->fi_flags |= EFA_RDM_TXE_NO_COMPLETION;
+		rxe->internal_flags |= EFA_RDM_TXE_NO_COMPLETION;
 		efa_cntr_report_error(&ep->base_ep.util_ep, rxe->cq_entry.flags);
 		return;
 	}
@@ -920,7 +919,7 @@ void efa_rdm_rxe_report_completion(struct efa_rdm_ope *rxe)
 			return;
 		}
 
-		rxe->fi_flags |= EFA_RDM_TXE_NO_COMPLETION;
+		rxe->internal_flags |= EFA_RDM_TXE_NO_COMPLETION;
 	}
 
 	efa_cntr_report_rx_completion(&ep->base_ep.util_ep, rxe->cq_entry.flags);
@@ -946,7 +945,7 @@ static inline
 bool efa_rdm_txe_should_update_cq(struct efa_rdm_ope *txe)
 
 {
-	if (txe->fi_flags & EFA_RDM_TXE_NO_COMPLETION)
+	if (txe->internal_flags & EFA_RDM_TXE_NO_COMPLETION)
 		return false;
 
 	/*
@@ -1023,7 +1022,7 @@ void efa_rdm_txe_report_completion(struct efa_rdm_ope *txe)
 	}
 
 	efa_cntr_report_tx_completion(&txe->ep->base_ep.util_ep, txe->cq_entry.flags);
-	txe->fi_flags |= EFA_RDM_TXE_NO_COMPLETION;
+	txe->internal_flags |= EFA_RDM_TXE_NO_COMPLETION;
 	return;
 }
 
@@ -1074,7 +1073,7 @@ void efa_rdm_ope_handle_send_completed(struct efa_rdm_ope *ope)
 		if (ope->fi_flags & FI_COMPLETION) {
 			efa_rdm_txe_report_completion(ope);
 		} else {
-			if (!(ope->fi_flags & EFA_RDM_TXE_NO_COUNTER))
+			if (!(ope->internal_flags & EFA_RDM_TXE_NO_COUNTER))
 				efa_cntr_report_tx_completion(&ep->base_ep.util_ep, ope->cq_entry.flags);
 		}
 
@@ -1321,7 +1320,7 @@ ssize_t efa_rdm_txe_prepare_local_read_pkt_entry(struct efa_rdm_ope *txe)
 	assert(pkt_entry_copy->mr);
 	txe->local_read_pkt_entry = pkt_entry_copy;
 	/* pkt from read-copy pool only stores actual application data in wiredata */
-	assert(ofi_is_addr_aligned((void *)pkt_entry_copy->wiredata, EFA_RDM_IN_ORDER_ALIGNMENT));
+	assert(ofi_is_addr_aligned((void *)pkt_entry_copy->wiredata, EFA_RDM_EP_IN_ORDER_ALIGNMENT));
 	txe->rma_iov[0].addr = (uint64_t)pkt_entry_copy->wiredata;
 	txe->rma_iov[0].key = fi_mr_key(pkt_entry_copy->mr);
 	return 0;
@@ -1348,7 +1347,7 @@ void efa_rdm_ope_prepare_to_post_write(struct efa_rdm_ope *ope)
 	{
 		size_t remote_iov_len;
 		remote_iov_len = ofi_total_rma_iov_len(ope->rma_iov, ope->rma_iov_count);
-		assert( local_iov_len == remote_iov_len );
+		assert(local_iov_len == 0 || local_iov_len == remote_iov_len);
 	}
 #endif
 
@@ -1381,7 +1380,11 @@ int efa_rdm_ope_post_read(struct efa_rdm_ope *ope)
 
 	ep = ope->ep;
 
-	assert(ope->iov_count > 0 && ope->iov_count <= efa_rdm_ep_domain(ep)->info->tx_attr->iov_limit);
+	/*
+	 * Allow local iov count to be equal to 0 b/c bounce buffer's pre-registered buff/desc
+	 * will be passed to rdma-core
+	 */
+	assert((ope->iov_count == 0 && ope->bytes_read_total_len == 0) || ope->iov_count <= efa_rdm_ep_domain(ep)->info->tx_attr->iov_limit);
 	assert(ope->rma_iov_count > 0 && ope->rma_iov_count <= efa_rdm_ep_domain(ep)->info->tx_attr->rma_iov_limit);
 
 	if (ope->bytes_read_total_len == 0) {
@@ -1400,9 +1403,9 @@ int efa_rdm_ope_post_read(struct efa_rdm_ope *ope)
 
 		efa_rdm_pke_init_read_context(pkt_entry, ope, ofi_buf_index(ope), 0);
 		err = efa_rdm_pke_read(pkt_entry,
-					 ope->iov[0].iov_base,
+					 pkt_entry->wiredata,
 					 0,
-					 ope->desc[0],
+					 fi_mr_desc(pkt_entry->mr),
 					 ope->rma_iov[0].addr,
 					 ope->rma_iov[0].key);
 		if (err)
@@ -1526,7 +1529,11 @@ int efa_rdm_ope_post_remote_write(struct efa_rdm_ope *ope)
 
 	ep = ope->ep;
 
-	assert(ope->iov_count > 0 && ope->iov_count <= efa_rdm_ep_domain(ep)->info->tx_attr->iov_limit);
+	/*
+	 * Allow local iov count to be equal to 0 b/c bounce buffer's pre-registered buff/desc
+	 * will be passed to rdma-core
+	 */
+	assert((ope->iov_count == 0 && ope->bytes_write_total_len == 0) || ope->iov_count <= efa_rdm_ep_domain(ep)->info->tx_attr->iov_limit);
 	assert(ope->rma_iov_count > 0 && ope->rma_iov_count <= efa_rdm_ep_domain(ep)->info->tx_attr->rma_iov_limit);
 
 	if (ope->bytes_write_total_len == 0) {
@@ -1752,7 +1759,7 @@ int efa_rdm_rxe_post_local_read_or_queue(struct efa_rdm_ope *rxe,
 	msg_rma.rma_iov_count = 1;
 
 	txe = efa_rdm_rma_alloc_txe(rxe->ep, NULL, &msg_rma, ofi_op_read_req,
-				    0 /* flags*/);
+				    0 /* flags */, 0 /* internal_flags */);
 	if (!txe) {
 		return -FI_ENOBUFS;
 	}
@@ -1782,46 +1789,47 @@ int efa_rdm_rxe_post_local_read_or_queue(struct efa_rdm_ope *rxe,
 ssize_t efa_rdm_ope_post_send(struct efa_rdm_ope *ope, int pkt_type)
 {
 	struct efa_rdm_ep *ep;
-	struct efa_rdm_pke *pkt_entry_vec[EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND];
 	ssize_t err;
 	int64_t segment_offset;
-	int pkt_entry_cnt, pkt_entry_cnt_allocated = 0, pkt_entry_data_size_vec[EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND];
+	int pkt_entry_cnt_allocated = 0;
 	int i;
 	uint64_t flags = 0;
 
-	err = efa_rdm_ope_prepare_to_post_send(ope, pkt_type, &pkt_entry_cnt, pkt_entry_data_size_vec);
-	if (err)
-		return err;
-	assert(pkt_entry_cnt <= EFA_RDM_EP_MAX_WR_PER_IBV_POST_SEND);
-
 	ep = ope->ep;
 	assert(ep);
-	segment_offset = efa_rdm_pkt_type_contains_data(pkt_type) ? (int64_t) ope->bytes_sent : -1;
-	for (i = 0; i < pkt_entry_cnt; ++i) {
-		pkt_entry_vec[i] = efa_rdm_pke_alloc(ep, ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);
 
-		if (OFI_UNLIKELY(!pkt_entry_vec[i])) {
+	err = efa_rdm_ope_prepare_to_post_send(ope, pkt_type,
+					       &ep->send_pkt_entry_vec_size,
+					       ep->send_pkt_entry_vec_data_sizes);
+	if (err)
+		return err;
+	assert(ep->send_pkt_entry_vec_size <=
+	       efa_base_ep_get_tx_pool_size(&ep->base_ep));
+
+	segment_offset = efa_rdm_pkt_type_contains_data(pkt_type) ? (int64_t) ope->bytes_sent : -1;
+	for (i = 0; i < ep->send_pkt_entry_vec_size; ++i) {
+		ep->send_pkt_entry_vec[i] = efa_rdm_pke_alloc(ep, ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);
+
+		if (OFI_UNLIKELY(!ep->send_pkt_entry_vec[i])) {
 			err = -FI_EAGAIN;
 			goto handle_err;
 		}
 
 		pkt_entry_cnt_allocated++;
 
-		err = efa_rdm_pke_fill_data(pkt_entry_vec[i],
-					    pkt_type,
-					    ope,
-					    segment_offset,
-					    pkt_entry_data_size_vec[i]);
+		err = efa_rdm_pke_fill_data(ep->send_pkt_entry_vec[i], pkt_type,
+					    ope, segment_offset,
+					    ep->send_pkt_entry_vec_data_sizes[i]);
 		if (err)
 			goto handle_err;
 
-		if (segment_offset != -1 && pkt_entry_cnt > 1) {
-			assert(pkt_entry_data_size_vec[i] > 0);
-			segment_offset += pkt_entry_data_size_vec[i];
+		if (segment_offset != -1 && ep->send_pkt_entry_vec_size > 1) {
+			assert(ep->send_pkt_entry_vec_data_sizes[i] > 0);
+			segment_offset += ep->send_pkt_entry_vec_data_sizes[i];
 		}
 	}
 
-	assert(pkt_entry_cnt == pkt_entry_cnt_allocated);
+	assert(ep->send_pkt_entry_vec_size == pkt_entry_cnt_allocated);
 
 	/**
 	 * We currently respect FI_MORE only for eager pkt type because
@@ -1837,19 +1845,20 @@ ssize_t efa_rdm_ope_post_send(struct efa_rdm_ope *ope, int pkt_type)
 	if (ope->fi_flags & FI_MORE && efa_rdm_pkt_type_is_eager(pkt_type))
 		flags |= FI_MORE;
 
-	err = efa_rdm_pke_sendv(pkt_entry_vec, pkt_entry_cnt, flags);
+	err = efa_rdm_pke_sendv(ep->send_pkt_entry_vec,
+				ep->send_pkt_entry_vec_size, flags);
 	if (err)
 		goto handle_err;
 
 	ope->peer->flags |= EFA_RDM_PEER_REQ_SENT;
-	for (i = 0; i < pkt_entry_cnt; ++i)
-		efa_rdm_pke_handle_sent(pkt_entry_vec[i], pkt_type, ope->peer);
+	for (i = 0; i < ep->send_pkt_entry_vec_size; ++i)
+		efa_rdm_pke_handle_sent(ep->send_pkt_entry_vec[i], pkt_type, ope->peer);
 
 	return FI_SUCCESS;
 
 handle_err:
 	for (i = 0; i < pkt_entry_cnt_allocated; ++i)
-		efa_rdm_pke_release_tx(pkt_entry_vec[i]);
+		efa_rdm_pke_release_tx(ep->send_pkt_entry_vec[i]);
 
 	return efa_rdm_ope_post_send_fallback(ope, pkt_type, err);
 }
@@ -1962,7 +1971,7 @@ ssize_t efa_rdm_ope_repost_ope_queued_before_handshake(struct efa_rdm_ope *ope)
 	}
 }
 
-int efa_rdm_ope_process_queued_ope(struct efa_rdm_ope *ope, uint16_t flag)
+int efa_rdm_ope_process_queued_ope(struct efa_rdm_ope *ope, uint32_t flag)
 {
 	int ret = 0;
 

@@ -271,7 +271,7 @@ static int sum_all_reduce_test_run(enum fi_collective_op coll_op, enum fi_op op,
 	if (result == expect_result)
 		return FI_SUCCESS;
 
-	FT_DEBUG("allreduce failed; expect: %ld, actual: %ld",
+	FT_DEBUG("allreduce failed; expect: %" PRIu64 ", actual: %" PRIu64,
 		 expect_result, result);
 	return -FI_ENOEQ;
 }
@@ -317,8 +317,8 @@ static int all_gather_test_run(enum fi_collective_op coll_op, enum fi_op op,
 
 	for (i = 0; i < pm_job.num_ranks; i++) {
 		if ((expect_result[i]) != result[i]) {
-			FT_DEBUG("allgather failed; expect[%ld]: %ld, "
-				 "actual[%ld]: %ld\n", i, expect_result[i],
+			FT_DEBUG("allgather failed; expect[%" PRIu64 "]: %" PRIu64 ", "
+				 "actual[%" PRIu64 "]: %" PRIu64 "\n", i, expect_result[i],
 				 i, result[i]);
 			ret = -1;
 			goto out;
@@ -373,7 +373,7 @@ static int scatter_test_run(enum fi_collective_op coll_op, enum fi_op op,
 		goto out;
 
 	if (data[pm_job.my_rank] != result) {
-		FT_DEBUG("scatter failed; expect: %ld, actual: %ld",
+		FT_DEBUG("scatter failed; expect: %" PRIu64 ", actual: %" PRIu64,
 			 data[pm_job.my_rank], result);
 		err = -1;
 		goto out;
@@ -436,8 +436,8 @@ static int broadcast_test_run(enum fi_collective_op coll_op, enum fi_op op,
 
 	for (i = 0; i < data_cnt; i++) {
 		if (result[i] != data[i]) {
-			FT_DEBUG("broadcast failed; expect: %ld, "
-				 "actual: %ld\n", data[i], result[i]);
+			FT_DEBUG("broadcast failed; expect: %" PRIu64 ", "
+				 "actual: %" PRIu64 "\n", data[i], result[i]);
 			err = -1;
 			goto out;
 		}
@@ -594,7 +594,7 @@ static int multinode_setup_fabric(int argc, char **argv)
 	return 0;
 
 errout:
-	ft_free_res();
+	(void) ft_free_res();
 	return ft_exit_code(err);
 }
 
@@ -607,7 +607,7 @@ static void pm_job_free_res(void)
 int multinode_run_tests(int argc, char **argv)
 {
 	struct coll_test *test;
-	int ret = FI_SUCCESS;
+	int ret = FI_SUCCESS, cleanup_ret;
 
 	ret = multinode_setup_fabric(argc, argv);
 	if (ret)
@@ -654,6 +654,6 @@ out:
 		printf("passed\n");
 
 	pm_job_free_res();
-	ft_free_res();
-	return ft_exit_code(ret);
+	cleanup_ret = ft_free_res();
+	return ft_exit_code(ret ? ret : cleanup_ret);
 }

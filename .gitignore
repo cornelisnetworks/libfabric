@@ -79,11 +79,13 @@ fabtests/benchmarks/fi_*
 fabtests/component/sock_test
 fabtests/component/dmabuf-rdma/xe_*
 fabtests/component/dmabuf-rdma/fi_*
+fabtests/component/dmabuf-rdma/cuda_*
 fabtests/functional/fi_*
 fabtests/unit/fi_*
 fabtests/multinode/fi_*
 fabtests/prov/efa/src/fi_efa*
 fabtests/prov/lpp/src/lpp_regression
+fabtests/prov/verbs/src/fi_*
 pingpong/fi_*
 
 fabtests/pytest/__pycache__
@@ -96,3 +98,7 @@ prov/efa/docs/doxygen/latex
 # Clang's compilation database file and directory.
 /.cache
 /compile_commands.json
+
+# Rust
+/target
+/Cargo.lock

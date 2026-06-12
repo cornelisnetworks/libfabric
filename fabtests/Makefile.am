@@ -64,13 +64,13 @@ bin_PROGRAMS = \
 	unit/fi_dom_test \
 	unit/fi_getinfo_test \
 	unit/fi_setopt_test \
+	unit/fi_check_hmem \
 	ubertest/fi_ubertest	\
 	multinode/fi_multinode	\
 	multinode/fi_multinode_coll \
 	component/sock_test \
-	regression/sighandler_test \
-	common/check_hmem \
-	common/check_cuda_dmabuf
+	component/dmabuf-rdma/cuda_check_dmabuf \
+	regression/sighandler_test
 
 if HAVE_ZE_DEVEL
 if HAVE_VERBS_DEVEL
@@ -200,6 +200,7 @@ nobase_dist_config_DATA = \
 	pytest/efa/test_gda.py \
 	pytest/efa/test_multi_ep_stress.py \
 	pytest/efa/test_efa_mmap.py \
+	pytest/efa/test_hw_cntr.py \
 	pytest/shm/conftest.py \
 	pytest/shm/shm_common.py \
 	pytest/shm/test_av.py \
@@ -244,6 +245,7 @@ libfabtests_la_SOURCES = \
 	include/ft_list.h \
 	include/hmem.h \
 	include/jsmn.h \
+	include/ft_random.h \
 	include/unix/osd.h \
 	include/ft_osd.h
 
@@ -487,6 +489,14 @@ unit_fi_setopt_test_SOURCES = \
 	$(unit_srcs)
 unit_fi_setopt_test_LDADD = libfabtests.la
 
+unit_fi_check_hmem_SOURCES = \
+	unit/check_hmem.c
+
+unit_fi_check_hmem_LDADD = libfabtests.la
+
+unit_fi_check_hmem_CFLAGS = \
+	$(AM_CFLAGS)
+
 ubertest_fi_ubertest_SOURCES = \
 	ubertest/fabtest.h \
 	ubertest/uber.c \
@@ -535,6 +545,14 @@ component_sock_test_LDADD = libfabtests.la
 component_sock_test_CFLAGS = \
 	$(AM_CFLAGS)
 
+component_dmabuf_rdma_cuda_check_dmabuf_SOURCES = \
+	component/dmabuf-rdma/check_cuda_dmabuf.c
+
+component_dmabuf_rdma_cuda_check_dmabuf_LDADD = libfabtests.la
+
+component_dmabuf_rdma_cuda_check_dmabuf_CFLAGS = \
+	$(AM_CFLAGS)
+
 if HAVE_ZE_DEVEL
 if HAVE_VERBS_DEVEL
 component_dmabuf_rdma_xe_rdmabw_SOURCES = \
@@ -542,9 +560,7 @@ component_dmabuf_rdma_xe_rdmabw_SOURCES = \
 	component/dmabuf-rdma/util.c \
 	component/dmabuf-rdma/util.h \
 	component/dmabuf-rdma/xe.c \
-	component/dmabuf-rdma/xe.h \
-	component/dmabuf-rdma/dmabuf_reg.c \
-	component/dmabuf-rdma/dmabuf_reg.h
+	component/dmabuf-rdma/xe.h
 
 component_dmabuf_rdma_xe_rdmabw_LDADD = libfabtests.la
 
@@ -556,9 +572,7 @@ component_dmabuf_rdma_xe_mr_reg_SOURCES = \
 	component/dmabuf-rdma/mr-reg-xe.c \
 	component/dmabuf-rdma/util.h \
 	component/dmabuf-rdma/xe.c \
-	component/dmabuf-rdma/xe.h \
-	component/dmabuf-rdma/dmabuf_reg.c \
-	component/dmabuf-rdma/dmabuf_reg.h
+	component/dmabuf-rdma/xe.h
 
 component_dmabuf_rdma_xe_mr_reg_LDADD = libfabtests.la
 
@@ -574,8 +588,8 @@ component_dmabuf_rdma_fi_xe_rdmabw_SOURCES = \
 	component/dmabuf-rdma/util.h \
 	component/dmabuf-rdma/xe.c \
 	component/dmabuf-rdma/xe.h \
-	component/dmabuf-rdma/dmabuf_reg.c \
-	component/dmabuf-rdma/dmabuf_reg.h
+	component/dmabuf-rdma/shared.c \
+	component/dmabuf-rdma/shared.h
 
 component_dmabuf_rdma_fi_xe_rdmabw_LDADD = libfabtests.la
 
@@ -585,11 +599,12 @@ component_dmabuf_rdma_fi_xe_rdmabw_CFLAGS = \
 
 component_dmabuf_rdma_fi_xe_mr_reg_SOURCES = \
 	component/dmabuf-rdma/fi-mr-reg-xe.c \
+	component/dmabuf-rdma/util.c \
 	component/dmabuf-rdma/util.h \
 	component/dmabuf-rdma/xe.c \
 	component/dmabuf-rdma/xe.h \
-	component/dmabuf-rdma/dmabuf_reg.c \
-	component/dmabuf-rdma/dmabuf_reg.h
+	component/dmabuf-rdma/shared.c \
+	component/dmabuf-rdma/shared.h
 
 component_dmabuf_rdma_fi_xe_mr_reg_LDADD = libfabtests.la
 
@@ -600,7 +615,9 @@ component_dmabuf_rdma_fi_xe_mr_reg_CFLAGS = \
 component_dmabuf_rdma_xe_memcopy_SOURCES = \
 	component/dmabuf-rdma/memcopy-xe.c \
 	component/dmabuf-rdma/util.c \
-	component/dmabuf-rdma/util.h
+	component/dmabuf-rdma/util.h \
+	component/dmabuf-rdma/xe.c \
+	component/dmabuf-rdma/xe.h
 
 component_dmabuf_rdma_xe_memcopy_LDADD = libfabtests.la
 
@@ -614,22 +631,6 @@ regression_sighandler_test_SOURCES = \
 regression_sighandler_test_LDADD = libfabtests.la
 
 regression_sighandler_test_CFLAGS = \
-	$(AM_CFLAGS)
-
-common_check_hmem_SOURCES = \
-	common/check_hmem.c
-
-common_check_hmem_LDADD = libfabtests.la
-
-common_checK_hmem_CFLAGS = \
-	$(AM_CFLAGS)
-
-common_check_cuda_dmabuf_SOURCES = \
-	common/check_cuda_dmabuf.c
-
-common_check_cuda_dmabuf_LDADD = libfabtests.la
-
-common_check_cuda_dmabuf_CFLAGS = \
 	$(AM_CFLAGS)
 
 real_man_pages = \
@@ -697,6 +698,7 @@ include prov/efa/Makefile.include
 if !MACOS
 include prov/lpp/Makefile.include
 endif
+include prov/verbs/Makefile.include
 
 man_MANS = $(real_man_pages) $(dummy_man_pages)
 

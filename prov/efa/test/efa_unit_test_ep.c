@@ -4,6 +4,7 @@
 #include "efa_unit_tests.h"
 #include "rdm/efa_rdm_cq.h"
 #include "efa_rdm_pke_utils.h"
+#include "efa_rdm_pke_nonreq.h"
 #include "efa_data_path_direct_entry.h"
 
 /**
@@ -150,7 +151,7 @@ void test_efa_rdm_ep_handshake_exchange_host_id(struct efa_resource **state, uin
 	 */
 	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pkt_entry);
-	efa_rdm_ep->efa_rx_pkts_posted = efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+	efa_rdm_ep->efa_rx_pkts_posted = efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
 	pkt_attr.connid = include_connid ? raw_addr.qkey : 0;
 	pkt_attr.host_id = g_efa_unit_test_mocks.peer_host_id;
@@ -170,7 +171,6 @@ void test_efa_rdm_ep_handshake_exchange_host_id(struct efa_resource **state, uin
 	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_slid = &efa_mock_efa_ibv_cq_wc_read_slid_return_mock;
 	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_src_qp = &efa_mock_efa_ibv_cq_wc_read_src_qp_return_mock;
 	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_qp_num = &efa_mock_efa_ibv_cq_wc_read_qp_num_return_mock;
-	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_wc_flags = &efa_mock_efa_ibv_cq_wc_read_wc_flags_return_mock;
 	g_efa_unit_test_mocks.efa_ibv_cq_wc_read_vendor_err = &efa_mock_efa_ibv_cq_wc_read_vendor_err_return_mock;
 	g_efa_unit_test_mocks.efa_ibv_cq_start_poll = &efa_mock_efa_ibv_cq_start_poll_return_mock;
 	ibv_cq->ibv_cq_ex->status = IBV_WC_SUCCESS;
@@ -183,7 +183,6 @@ void test_efa_rdm_ep_handshake_exchange_host_id(struct efa_resource **state, uin
 	will_return_uint(efa_mock_efa_ibv_cq_wc_read_byte_len_return_mock, pkt_entry->pkt_size);
 	will_return_int(efa_mock_efa_ibv_cq_wc_read_opcode_return_mock, IBV_WC_RECV);
 	will_return_uint(efa_mock_efa_ibv_cq_wc_read_qp_num_return_mock, efa_rdm_ep->base_ep.qp->qp_num);
-	will_return_uint(efa_mock_efa_ibv_cq_wc_read_wc_flags_return_mock, 0);
 	will_return_uint(efa_mock_efa_ibv_cq_wc_read_slid_return_mock, efa_rdm_ep_get_peer_ahn(efa_rdm_ep, peer_addr));
 	will_return_uint(efa_mock_efa_ibv_cq_wc_read_src_qp_return_mock, raw_addr.qpn);
 	will_return_int(efa_mock_efa_ibv_cq_start_poll_return_mock, IBV_WC_SUCCESS);
@@ -262,12 +261,17 @@ void test_efa_rdm_ep_handshake_receive_without_peer_host_id_and_do_not_send_loca
 void test_efa_rdm_ep_tx_pkt_pool_flags(struct efa_resource **state) {
 	struct efa_resource *resource = *state;
 	struct efa_rdm_ep *efa_rdm_ep;
+	uint64_t flags = OFI_BUFPOOL_NONSHARED | OFI_BUFPOOL_NO_TRACK;
+
+#if ENABLE_DEBUG
+	flags &= ~OFI_BUFPOOL_NO_TRACK;
+#endif
 
 	efa_env.huge_page_setting = EFA_ENV_HUGE_PAGE_DISABLED;
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 
-	assert_int_equal(efa_rdm_ep->efa_tx_pkt_pool->attr.flags, OFI_BUFPOOL_NONSHARED);
+	assert_int_equal(efa_rdm_ep->efa_tx_pkt_pool->attr.flags, flags);
 }
 
 /**
@@ -280,7 +284,7 @@ void test_efa_rdm_ep_rx_pkt_pool_flags(struct efa_resource **state) {
 	struct efa_rdm_ep *efa_rdm_ep;
 	uint64_t flags = OFI_BUFPOOL_NONSHARED | OFI_BUFPOOL_NO_TRACK;
 
-#ifdef ENABLE_DEBUG
+#if ENABLE_DEBUG
 	flags &= ~OFI_BUFPOOL_NO_TRACK;
 #endif
 
@@ -288,7 +292,7 @@ void test_efa_rdm_ep_rx_pkt_pool_flags(struct efa_resource **state) {
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 
-	assert_int_equal(efa_rdm_ep->efa_tx_pkt_pool->attr.flags, flags);
+	assert_int_equal(efa_rdm_ep->efa_rx_pkt_pool->attr.flags, flags);
 }
 
 /**
@@ -304,6 +308,11 @@ void test_efa_rdm_ep_pkt_pool_page_alignment(struct efa_resource **state)
 	struct fid_ep *ep;
 	struct efa_rdm_ep *efa_rdm_ep;
 	struct efa_resource *resource = *state;
+	uint64_t flags = OFI_BUFPOOL_NONSHARED | OFI_BUFPOOL_NO_TRACK;
+
+#if ENABLE_DEBUG
+	flags &= ~OFI_BUFPOOL_NO_TRACK;
+#endif
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 
@@ -311,7 +320,7 @@ void test_efa_rdm_ep_pkt_pool_page_alignment(struct efa_resource **state)
 	ret = fi_endpoint(resource->domain, resource->info, &ep, NULL);
 	assert_int_equal(ret, 0);
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
-	assert_int_equal(efa_rdm_ep->efa_rx_pkt_pool->attr.flags, OFI_BUFPOOL_NONSHARED);
+	assert_int_equal(efa_rdm_ep->efa_rx_pkt_pool->attr.flags, flags);
 
 	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pkt_entry);
@@ -354,7 +363,7 @@ void test_efa_rdm_read_copy_pkt_pool_128_alignment(struct efa_resource **state)
 	assert_non_null(pkt_entry);
 	efa_rdm_ep->rx_readcopy_pkt_pool_used++;
 	assert(ofi_is_addr_aligned((void *) pkt_entry->wiredata,
-				   EFA_RDM_IN_ORDER_ALIGNMENT));
+				   EFA_RDM_EP_IN_ORDER_ALIGNMENT));
 	efa_rdm_pke_release_rx(pkt_entry);
 
 	fi_close(&ep->fid);
@@ -369,12 +378,12 @@ void test_efa_rdm_pke_get_available_copy_methods_align128(struct efa_resource **
 {
 	int ret;
 	struct efa_rdm_ep *efa_rdm_ep;
-	struct efa_mr efa_mr;
+	struct efa_rdm_mr efa_rdm_mr;
 	struct efa_resource *resource = *state;
 	bool local_read_available, gdrcopy_available, cuda_memcpy_available;
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
-	efa_mr.peer.iface = FI_HMEM_CUDA;
+	efa_rdm_mr.efa_mr.iface = FI_HMEM_CUDA;
 
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 	efa_rdm_ep->sendrecv_in_order_aligned_128_bytes = 1;
@@ -390,7 +399,7 @@ void test_efa_rdm_pke_get_available_copy_methods_align128(struct efa_resource **
 		EFADV_DEVICE_ATTR_CAPS_RDMA_READ;
 
 	ret = efa_rdm_pke_get_available_copy_methods(
-		efa_rdm_ep, &efa_mr, &local_read_available,
+		efa_rdm_ep, &efa_rdm_mr, &local_read_available,
 		&cuda_memcpy_available, &gdrcopy_available);
 
 	efa_rdm_ep_domain(efa_rdm_ep)->device->device_caps = caps;
@@ -402,199 +411,30 @@ void test_efa_rdm_pke_get_available_copy_methods_align128(struct efa_resource **
 }
 
 /**
- * @brief when delivery complete atomic was used and handshake packet has not been received
- * verify the txe is queued
- *
- * @param[in]	state		struct efa_resource that is managed by the framework
+ * @brief Issue fi_read or fi_write based on op code.
  */
-void test_efa_rdm_ep_dc_atomic_queue_before_handshake(struct efa_resource **state)
+static int test_efa_rdm_ep_rma_issue_op(struct fid_ep *ep, int op,
+				   char *buf, int buf_len,
+				   fi_addr_t peer_addr,
+				   uint64_t rma_addr, uint64_t rma_key)
 {
-	struct efa_rdm_ep *efa_rdm_ep;
-	struct efa_rdm_peer *peer;
-	struct fi_ioc ioc = {0};
-	struct fi_rma_ioc rma_ioc = {0};
-	struct fi_msg_atomic msg = {0};
-	struct efa_resource *resource = *state;
-	struct efa_ep_addr raw_addr = {0};
-	size_t raw_addr_len = sizeof(struct efa_ep_addr);
-	fi_addr_t peer_addr;
-	int buf[1] = {0}, err, numaddr;
-	struct efa_rdm_ope *txe;
+	if (op == ofi_op_read_req)
+		return fi_read(ep, buf, buf_len, NULL, peer_addr,
+			       rma_addr, rma_key, NULL);
+	else if (op == ofi_op_write)
+		return fi_write(ep, buf, buf_len, NULL, peer_addr,
+				rma_addr, rma_key, NULL);
 
-	/* disable shm to force using efa device to send */
-	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
-
-	/* create a fake peer */
-	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
-	assert_int_equal(err, 0);
-	raw_addr.qpn = 1;
-	raw_addr.qkey = 0x1234;
-	numaddr = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
-	assert_int_equal(numaddr, 1);
-
-	msg.addr = peer_addr;
-
-	ioc.addr = buf;
-	ioc.count = 1;
-	msg.msg_iov = &ioc;
-	msg.iov_count = 1;
-
-	msg.rma_iov = &rma_ioc;
-	msg.rma_iov_count = 1;
-	msg.datatype = FI_INT32;
-	msg.op = FI_SUM;
-
-	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
-
-	/* set peer->flag to EFA_RDM_PEER_REQ_SENT will make efa_rdm_atomic() think
-	 * a REQ packet has been sent to the peer (so no need to send again)
-	 * handshake has not been received, so we do not know whether the peer support DC
-	 */
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
-	peer->flags = EFA_RDM_PEER_REQ_SENT;
-	peer->is_local = false;
-
-	assert_false(efa_rdm_ep->homogeneous_peers);
-	assert_true(dlist_empty(&efa_rdm_ep->txe_list));
-	err = fi_atomicmsg(resource->ep, &msg, FI_DELIVERY_COMPLETE);
-	/* DC has been reuquested, but ep do not know whether peer supports it, therefore
-	 * the ope has been queued to domain->ope_queued_list
-	 */
-	assert_int_equal(err, 0);
-	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list),  1);
-	assert_int_equal(efa_unit_test_get_dlist_length(&(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list)), 1);
-	txe = container_of(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list.next, struct efa_rdm_ope, queued_entry);
-	assert_true((txe->op == ofi_op_atomic));
-	assert_true(txe->internal_flags & EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE);
+	fail_msg("Unknown op code %d", op);
+	return -FI_EINVAL;
 }
 
 /**
- * @brief when delivery complete send was used and handshake packet has not been received
- * verify the txe is queued
- *
- * @param[in]	state		struct efa_resource that is managed by the framework
- */
-void test_efa_rdm_ep_dc_send_queue_before_handshake(struct efa_resource **state)
-{
-	struct efa_rdm_ep *efa_rdm_ep;
-	struct efa_rdm_peer *peer;
-	struct fi_msg msg = {0};
-	struct iovec iov;
-	struct efa_resource *resource = *state;
-	struct efa_ep_addr raw_addr = {0};
-	size_t raw_addr_len = sizeof(struct efa_ep_addr);
-	fi_addr_t peer_addr;
-	int err, numaddr;
-	struct efa_rdm_ope *txe;
-
-	/* disable shm to force using efa device to send */
-	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
-
-	/* create a fake peer */
-	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
-	assert_int_equal(err, 0);
-	raw_addr.qpn = 1;
-	raw_addr.qkey = 0x1234;
-	numaddr = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
-	assert_int_equal(numaddr, 1);
-
-	msg.addr = peer_addr;
-	msg.iov_count = 1;
-	iov.iov_base = NULL;
-	iov.iov_len = 0;
-	msg.msg_iov = &iov;
-	msg.desc = NULL;
-
-	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
-
-	/* set peer->flag to EFA_RDM_PEER_REQ_SENT will make efa_rdm_atomic() think
-	 * a REQ packet has been sent to the peer (so no need to send again)
-	 * handshake has not been received, so we do not know whether the peer support DC
-	 */
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
-	peer->flags = EFA_RDM_PEER_REQ_SENT;
-	peer->is_local = false;
-
-	assert_false(efa_rdm_ep->homogeneous_peers);
-	assert_true(dlist_empty(&efa_rdm_ep->txe_list));
-	err = fi_sendmsg(resource->ep, &msg, FI_DELIVERY_COMPLETE);
-	/* DC has been reuquested, but ep do not know whether peer supports it, therefore
-	 * the ope has been queued to domain->ope_queued_list
-	 */
-	assert_int_equal(err, 0);
-	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list),  1);
-	assert_int_equal(efa_unit_test_get_dlist_length(&(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list)), 1);
-	txe = container_of(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list.next, struct efa_rdm_ope, queued_entry);
-	assert_true((txe->op == ofi_op_msg));
-	assert_true(txe->internal_flags & EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE);
-}
-
-/**
- * @brief when delivery complete send was used and handshake packet has not been received
- * verify the txes are queued before the number of requests reach EFA_RDM_MAX_QUEUED_OPE_BEFORE_HANDSHAKE.
- * After reaching the limit, fi_send should return -FI_EAGAIN
- *
- * @param[in]	state		struct efa_resource that is managed by the framework
- */
-void test_efa_rdm_ep_dc_send_queue_limit_before_handshake(struct efa_resource **state)
-{
-	struct efa_rdm_ep *efa_rdm_ep;
-	struct efa_rdm_peer *peer;
-	struct fi_msg msg = {0};
-	struct iovec iov;
-	struct efa_resource *resource = *state;
-	struct efa_ep_addr raw_addr = {0};
-	size_t raw_addr_len = sizeof(struct efa_ep_addr);
-	fi_addr_t peer_addr;
-	int err, numaddr;
-	int i;
-
-	/* disable shm to force using efa device to send */
-	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
-
-	/* create a fake peer */
-	err = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
-	assert_int_equal(err, 0);
-	raw_addr.qpn = 1;
-	raw_addr.qkey = 0x1234;
-	numaddr = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
-	assert_int_equal(numaddr, 1);
-
-	msg.addr = peer_addr;
-	msg.iov_count = 1;
-	iov.iov_base = NULL;
-	iov.iov_len = 0;
-	msg.msg_iov = &iov;
-	msg.desc = NULL;
-
-	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
-
-	/* set peer->flag to EFA_RDM_PEER_REQ_SENT will make efa_rdm_atomic() think
-	 * a REQ packet has been sent to the peer (so no need to send again)
-	 * handshake has not been received, so we do not know whether the peer support DC
-	 */
-	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
-	peer->flags = EFA_RDM_PEER_REQ_SENT;
-	peer->is_local = false;
-
-	assert_false(efa_rdm_ep->homogeneous_peers);
-	assert_true(dlist_empty(&efa_rdm_ep->txe_list));
-
-	for (i = 0; i < EFA_RDM_MAX_QUEUED_OPE_BEFORE_HANDSHAKE; i++) {
-		err = fi_sendmsg(resource->ep, &msg, FI_DELIVERY_COMPLETE);
-		assert_int_equal(err, 0);
-	}
-
-	assert_true(efa_rdm_ep->ope_queued_before_handshake_cnt == EFA_RDM_MAX_QUEUED_OPE_BEFORE_HANDSHAKE);
-	err = fi_sendmsg(resource->ep, &msg, FI_DELIVERY_COMPLETE);
-	assert_int_equal(err, -FI_EAGAIN);
-}
-
-/**
- * @brief verify tx entry is queued for rma (read or write) request before handshake is made.
+ * @brief Verify tx entry is queued for rma request before handshake,
+ * and that exceeding the queue limit returns -FI_EAGAIN.
  *
  * @param[in] state	struct efa_resource that is managed by the framework
- * @param[in] op op code
+ * @param[in] op	op code (ofi_op_write or ofi_op_read_req)
  */
 void test_efa_rdm_ep_rma_queue_before_handshake(struct efa_resource **state, int op)
 {
@@ -606,7 +446,7 @@ void test_efa_rdm_ep_rma_queue_before_handshake(struct efa_resource **state, int
 	int num_addr;
 	const int buf_len = 8;
 	char buf[8] = {0};
-	int err;
+	int err, i;
 	uint64_t rma_addr, rma_key;
 	struct efa_rdm_ope *txe;
 	struct efa_rdm_peer *peer;
@@ -639,34 +479,33 @@ void test_efa_rdm_ep_rma_queue_before_handshake(struct efa_resource **state, int
 	 */
 	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
 	peer->flags = EFA_RDM_PEER_REQ_SENT;
-	peer->is_local = false;
+	/* Do not use shm in this unit test because we are testing efa rma path */
+	peer->conn->shm_fi_addr = FI_ADDR_NOTAVAIL;
 	assert_false(efa_rdm_ep->homogeneous_peers);
 	assert_true(dlist_empty(&efa_rdm_ep->txe_list));
 
-	if (op == ofi_op_read_req) {
-		err = fi_read(resource->ep, buf, buf_len,
-				NULL, /* desc, not required */
-				peer_addr,
-				rma_addr,
-				rma_key,
-				NULL); /* context */
-	} else if (op == ofi_op_write) {
-		err = fi_write(resource->ep, buf, buf_len,
-				NULL, /* desc, not required */
-				peer_addr,
-				rma_addr,
-				rma_key,
-				NULL); /* context */
-	} else {
-		fprintf(stderr, "Unknown op code %d\n", op);
-		fail();
-	}
+	err = test_efa_rdm_ep_rma_issue_op(resource->ep, op, buf, buf_len,
+				      peer_addr, rma_addr, rma_key);
 	assert_int_equal(err, 0);
 	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list),  1);
 	assert_int_equal(efa_unit_test_get_dlist_length(&(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list)), 1);
 	txe = container_of(efa_rdm_ep_domain(efa_rdm_ep)->ope_queued_list.next, struct efa_rdm_ope, queued_entry);
 	assert_true((txe->op == op));
 	assert_true(txe->internal_flags & EFA_RDM_OPE_QUEUED_BEFORE_HANDSHAKE);
+
+	/* Fill remaining slots up to the limit (1 already queued) */
+	for (i = 1; i < EFA_RDM_MAX_QUEUED_OPE_BEFORE_HANDSHAKE; i++) {
+		err = test_efa_rdm_ep_rma_issue_op(resource->ep, op, buf, buf_len,
+					      peer_addr, rma_addr, rma_key);
+		assert_int_equal(err, 0);
+	}
+	assert_int_equal(efa_rdm_ep->ope_queued_before_handshake_cnt,
+	                 EFA_RDM_MAX_QUEUED_OPE_BEFORE_HANDSHAKE);
+
+	/* Exceeding the limit should return -FI_EAGAIN */
+	err = test_efa_rdm_ep_rma_issue_op(resource->ep, op, buf, buf_len,
+				      peer_addr, rma_addr, rma_key);
+	assert_int_equal(err, -FI_EAGAIN);
 }
 
 void test_efa_rdm_ep_write_queue_before_handshake(struct efa_resource **state)
@@ -731,12 +570,86 @@ void test_efa_rdm_ep_trigger_handshake(struct efa_resource **state)
 
 	txe = container_of(efa_rdm_ep->txe_list.next, struct efa_rdm_ope, ep_entry);
 
-	assert_true(txe->fi_flags & EFA_RDM_TXE_NO_COMPLETION);
-	assert_true(txe->fi_flags & EFA_RDM_TXE_NO_COUNTER);
+	assert_true(txe->internal_flags & EFA_RDM_TXE_NO_COMPLETION);
+	assert_true(txe->internal_flags & EFA_RDM_TXE_NO_COUNTER);
 	assert_true(txe->internal_flags & EFA_RDM_OPE_INTERNAL);
 
 	efa_rdm_txe_release(txe);
 	efa_rdm_ep->efa_outstanding_tx_ops = 0;
+}
+
+/**
+ * @brief Verify that efa_rdm_txe_construct() routes the caller-provided
+ *        libfabric flags to txe->fi_flags and EFA-internal flags
+ *        (EFA_RDM_TXE_NO_COMPLETION, EFA_RDM_TXE_NO_COUNTER,
+ *        EFA_RDM_OPE_INTERNAL, ...) to txe->internal_flags. The two
+ *        fields are independent storage, so bit-position coincidences
+ *        between FI_* and EFA_RDM_* flags are fine; we only assert that
+ *        each requested bit lands in its own field and that a zero
+ *        internal_flags argument does not implicitly set any EFA-internal
+ *        bit.
+ */
+void test_efa_rdm_txe_construct_splits_internal_flags(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ope *txe;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_peer *peer;
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(raw_addr);
+	struct iovec iov = {0};
+	struct fi_msg msg = {0};
+	fi_addr_t addr;
+	uint32_t internal_flags_in = EFA_RDM_TXE_NO_COMPLETION |
+				     EFA_RDM_TXE_NO_COUNTER |
+				     EFA_RDM_OPE_INTERNAL;
+	uint64_t fi_flags_in = FI_INJECT | FI_REMOTE_CQ_DATA;
+	int ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &addr, 0, NULL);
+	assert_int_equal(ret, 1);
+	peer = efa_rdm_ep_get_peer(efa_rdm_ep, addr);
+
+	msg.msg_iov = &iov;
+	msg.iov_count = 1;
+
+	/*
+	 * Case 1: caller passes a mix of libfabric and EFA-internal flags.
+	 * fi_flags and internal_flags are independent storage (uint64_t vs
+	 * uint32_t) so bit-position coincidences between FI_* and
+	 * EFA_RDM_* flags are fine: we only assert that every requested
+	 * bit is set in its own field.
+	 */
+	txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
+	assert_non_null(txe);
+	efa_rdm_txe_construct(txe, efa_rdm_ep, peer, &msg, ofi_op_msg,
+			      fi_flags_in, internal_flags_in);
+
+	/* Every EFA-internal bit requested is set in internal_flags. */
+	assert_int_equal(txe->internal_flags & internal_flags_in, internal_flags_in);
+	/* Every libfabric bit requested is set in fi_flags. */
+	assert_int_equal(txe->fi_flags & fi_flags_in, fi_flags_in);
+	efa_rdm_txe_release(txe);
+
+	/*
+	 * Case 2: caller passes 0 for internal_flags. No EFA-internal bits
+	 * should be set implicitly (catches a regression where the construct
+	 * fn OR's in a default internal flag).
+	 */
+	txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
+	assert_non_null(txe);
+	efa_rdm_txe_construct(txe, efa_rdm_ep, peer, &msg, ofi_op_msg,
+			      fi_flags_in, 0);
+	assert_int_equal(txe->internal_flags & internal_flags_in, 0);
+	assert_int_equal(txe->fi_flags & fi_flags_in, fi_flags_in);
+	efa_rdm_txe_release(txe);
 }
 
 /**
@@ -946,7 +859,7 @@ void test_efa_rdm_ep_close_shm_resource_unhappy(struct efa_resource **state)
 	size_t mr_size = 64;
 	void *buf;
 	struct fid_mr *mr = NULL;
-	struct efa_mr *efa_mr;
+	struct efa_rdm_mr *efa_rdm_mr;
 
 	buf = malloc(mr_size);
 	assert_non_null(buf);
@@ -963,8 +876,8 @@ void test_efa_rdm_ep_close_shm_resource_unhappy(struct efa_resource **state)
 				   FI_SEND | FI_RECV, 0, 0, 0, &mr, NULL),
 			 0);
 	assert_non_null(mr);
-	efa_mr = container_of(mr, struct efa_mr, mr_fid);
-	assert_non_null(efa_mr->shm_mr);
+	efa_rdm_mr = container_of(mr, struct efa_rdm_mr, efa_mr.mr_fid);
+	assert_non_null(efa_rdm_mr->shm_mr);
 
 	/* shm resource close should return EBUSY because shm mr was referencing the shm domain */
 	assert_int_equal(efa_rdm_ep_close_shm_resources(ep), -FI_EBUSY);
@@ -972,6 +885,7 @@ void test_efa_rdm_ep_close_shm_resource_unhappy(struct efa_resource **state)
 	assert_null(ep->shm_ep);
 
 	assert_int_equal(fi_close(&mr->fid), 0);
+	free(buf);
 }
 
 void test_efa_rdm_ep_setopt_shared_memory_permitted(struct efa_resource **state)
@@ -1064,247 +978,215 @@ void test_efa_rdm_ep_enable_qp_in_order_aligned_128_bytes_bad(struct efa_resourc
 
 #endif
 
-static void test_efa_rdm_ep_use_zcpy_rx_impl(struct efa_resource *resource,
-                                             bool cuda_p2p_disabled,
-                                             bool cuda_p2p_supported,
-                                             bool expected_use_zcpy_rx)
+/**
+ * @brief [Backwards compat] Verify that when zero-copy conditions are met,
+ * the endpoint sets peer_may_have_zcpy_rx but does NOT create a user_recv_qp
+ * or set the USER_RECV_QP flag in extra_info.
+ *
+ * This ensures the new code does not advertise zero-copy receive support
+ * (which would cause old peers to send headerless packets to us), while
+ * still being aware that old peers might have zero-copy enabled.
+ */
+void test_efa_rdm_ep_zcpy_recv_not_created_but_peer_flag_set(struct efa_resource **state)
 {
+	struct efa_resource *resource = *state;
 	struct efa_rdm_ep *ep;
 	size_t max_msg_size = 1000;
-	size_t inject_msg_size = 0;
-	size_t inject_rma_size = 0;
 	bool shm_permitted = false;
-	ofi_hmem_disable_p2p = cuda_p2p_disabled;
+
+	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
+	assert_non_null(resource->hints);
+
+	resource->hints->mode = FI_MSG_PREFIX;
+	resource->hints->caps = FI_MSG;
 
 	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM, FI_VERSION(1, 14),
 	                                            resource->hints, false, true);
 
-	/* System memory P2P should always be enabled */
-	assert_true(g_efa_hmem_info[FI_HMEM_SYSTEM].initialized);
-	assert_true(g_efa_hmem_info[FI_HMEM_SYSTEM].p2p_supported_by_device);
-
-	/**
-	 * We want to be able to run this test on any platform:
-	 * 1. Fake CUDA support.
-	 * 2. Disable all other hmem ifaces.
-	 */
-	g_efa_hmem_info[FI_HMEM_CUDA].initialized = true;
-	g_efa_hmem_info[FI_HMEM_CUDA].p2p_supported_by_device = cuda_p2p_supported;
-
-	g_efa_hmem_info[FI_HMEM_NEURON].initialized = false;
-	g_efa_hmem_info[FI_HMEM_SYNAPSEAI].initialized = false;
-
 	ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 
-	if (cuda_p2p_supported)
-		ep->hmem_p2p_opt = FI_HMEM_P2P_ENABLED;
-
-	/* Set sufficiently small max_msg_size */
 	assert_int_equal(fi_setopt(&resource->ep->fid, FI_OPT_ENDPOINT, FI_OPT_MAX_MSG_SIZE,
 			&max_msg_size, sizeof max_msg_size), 0);
 
-	/* Disable shm */
 	assert_int_equal(fi_setopt(&resource->ep->fid, FI_OPT_ENDPOINT, FI_OPT_SHARED_MEMORY_PERMITTED,
 			&shm_permitted, sizeof shm_permitted), 0);
 
-	assert_true(ep->base_ep.max_msg_size == max_msg_size);
-
-	/* Enable EP */
 	assert_int_equal(fi_enable(resource->ep), 0);
 
-	assert_true(ep->use_zcpy_rx == expected_use_zcpy_rx);
+	/* New code must NOT set USER_RECV_QP in extra_info (old peers would send zcpy to us) */
+	assert_false(ep->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP);
 
-	assert_int_equal(fi_getopt(&resource->ep->fid, FI_OPT_ENDPOINT, FI_OPT_INJECT_MSG_SIZE,
-			&inject_msg_size, &(size_t){sizeof inject_msg_size}), 0);
-	assert_int_equal(ep->base_ep.inject_msg_size, inject_msg_size);
-
-	assert_int_equal(fi_getopt(&resource->ep->fid, FI_OPT_ENDPOINT, FI_OPT_INJECT_RMA_SIZE,
-			&inject_rma_size, &(size_t){sizeof inject_rma_size}), 0);
-	assert_int_equal(ep->base_ep.inject_rma_size, inject_rma_size);
-
-	if (expected_use_zcpy_rx) {
-		assert_int_equal(inject_msg_size, efa_rdm_ep_domain(ep)->device->efa_attr.inline_buf_size);
-		assert_int_equal(inject_rma_size, efa_rdm_ep_domain(ep)->device->efa_attr.inline_buf_size);
-	} else {
-		assert_int_equal(inject_msg_size, resource->info->tx_attr->inject_size);
-		assert_int_equal(inject_rma_size, resource->info->tx_attr->inject_size);
-	}
-	/* restore global variable */
-	ofi_hmem_disable_p2p = 0;
+	/* But must know that old peers could have zcpy enabled */
+	assert_true(ep->peer_may_have_zcpy_rx);
 }
 
 /**
- * @brief Verify zcpy_rx is enabled when the following requirements are met:
- * 1. app doesn't require FI_ORDER_SAS in tx or rx's msg_order
- * 2. app uses FI_MSG_PREFIX mode
- * 3. app's max msg size is smaller than mtu_size - prefix_size
- * 4. app doesn't use FI_DIRECTED_RECV, FI_TAGGED, FI_ATOMIC capability
+ * @brief [Backwards compat] Verify that peer_may_have_zcpy_rx is false
+ * when SAS ordering is requested (which disables zcpy on old code too).
  */
-void test_efa_rdm_ep_user_zcpy_rx_disabled(struct efa_resource **state)
+void test_efa_rdm_ep_zcpy_compat_disabled_by_sas(struct efa_resource **state)
 {
 	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *ep;
+	size_t max_msg_size = 1000;
+	bool shm_permitted = false;
 
 	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
 	assert_non_null(resource->hints);
 
 	resource->hints->mode = FI_MSG_PREFIX;
 	resource->hints->caps = FI_MSG;
-
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, false, true, true);
-}
-
-/**
- * @brief Verify zcpy_rx is disabled if CUDA P2P is explictly disabled
- */
-void test_efa_rdm_ep_user_disable_p2p_zcpy_rx_disabled(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-
-	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
-	assert_non_null(resource->hints);
-
-	resource->hints->mode = FI_MSG_PREFIX;
-	resource->hints->caps = FI_MSG;
-
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, true, false, false);
-}
-
-/**
- * @brief When sas is requested for either tx or rx. zcpy will be disabled
- */
-void test_efa_rdm_ep_user_zcpy_rx_unhappy_due_to_sas(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-
-	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
-	assert_non_null(resource->hints);
-
 	resource->hints->tx_attr->msg_order = FI_ORDER_SAS;
 	resource->hints->rx_attr->msg_order = FI_ORDER_SAS;
-	resource->hints->mode = FI_MSG_PREFIX;
-	resource->hints->caps = FI_MSG;
 
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, false, true, false);
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM, FI_VERSION(1, 14),
+	                                            resource->hints, false, true);
+
+	ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	assert_int_equal(fi_setopt(&resource->ep->fid, FI_OPT_ENDPOINT, FI_OPT_MAX_MSG_SIZE,
+			&max_msg_size, sizeof max_msg_size), 0);
+
+	assert_int_equal(fi_setopt(&resource->ep->fid, FI_OPT_ENDPOINT, FI_OPT_SHARED_MEMORY_PERMITTED,
+			&shm_permitted, sizeof shm_permitted), 0);
+
+	assert_int_equal(fi_enable(resource->ep), 0);
+
+	assert_false(ep->peer_may_have_zcpy_rx);
 }
 
 /**
- * @brief Verify zcpy_rx is disabled if CUDA P2P is enabled but not supported
+ * @brief [Backwards compat] Verify that when a handshake is received from an
+ * old peer that has USER_RECV_QP enabled, the new code correctly parses the
+ * peer's user_recv_qp qpn and qkey from the handshake packet.
+ *
+ * This ensures the new code can send headerless packets to old peers that
+ * have zero-copy receive enabled.
  */
-void test_efa_rdm_ep_user_p2p_not_supported_zcpy_rx_happy(struct efa_resource **state)
+void test_efa_rdm_ep_handshake_receive_peer_user_recv_qp(struct efa_resource **state)
 {
+	fi_addr_t peer_addr = 0;
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(raw_addr);
+	struct efa_rdm_peer *peer;
 	struct efa_resource *resource = *state;
-
-	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
-	assert_non_null(resource->hints);
-
-	resource->hints->mode = FI_MSG_PREFIX;
-	resource->hints->caps = FI_MSG;
-
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, false, false, false);
-}
-
-/**
- * @brief Verify zcpy_rx is disabled if FI_MR_LOCAL is not set
- */
-void test_efa_rdm_ep_user_zcpy_rx_unhappy_due_to_no_mr_local(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-
-	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
-	assert_non_null(resource->hints);
-
-	resource->hints->caps = FI_MSG;
-	resource->hints->domain_attr->mr_mode &= ~FI_MR_LOCAL;
-
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, false, true, false);
-}
-
-void test_efa_rdm_ep_close_discard_posted_recv(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-	char buf[16];
-
-	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
-
-	/* Post recv and then close ep */
-	assert_int_equal(fi_recv(resource->ep, (void *) buf, 16, NULL, FI_ADDR_UNSPEC, NULL), 0);
-
-	assert_int_equal(fi_close(&resource->ep->fid), 0);
-
-	/* CQ should be empty and no err entry */
-	assert_int_equal(fi_cq_read(resource->cq, NULL, 1), -FI_EAGAIN);
-
-	/* Reset to NULL to avoid test reaper closing again */
-	resource->ep = NULL;
-}
-
-void test_efa_rdm_ep_zcpy_recv_cancel(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-	struct fi_context cancel_context = {0};
-	struct efa_unit_test_buff recv_buff;
-
-	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
-	assert_non_null(resource->hints);
-
-	resource->hints->caps = FI_MSG;
-
-	/* enable zero-copy recv mode in ep */
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, false, true, true);
-
-	/* Construct a recv buffer with mr */
-	efa_unit_test_buff_construct(&recv_buff, resource, 16);
-
-	assert_int_equal(fi_recv(resource->ep, recv_buff.buff, recv_buff.size, fi_mr_desc(recv_buff.mr), FI_ADDR_UNSPEC, &cancel_context), 0);
-
-	assert_int_equal(fi_cancel((struct fid *)resource->ep, &cancel_context), -FI_EOPNOTSUPP);
-
-	/**
-	 * the buf is still posted to rdma-core, so unregistering mr can
-	 * return non-zero. Currently ignore this failure.
-	 */
-	(void) fi_close(&recv_buff.mr->fid);
-	free(recv_buff.buff);
-}
-
-/**
- * @brief When user posts more than rx size fi_recv, we should return eagain and make sure
- * there is no rx entry leaked
- */
-void test_efa_rdm_ep_zcpy_recv_eagain(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-	struct efa_unit_test_buff recv_buff;
-	int i;
 	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_pke *pkt_entry;
+	struct efa_rdm_handshake_hdr *handshake_hdr;
+	struct efa_rdm_handshake_opt_user_recv_qp_hdr *user_recv_qp_hdr;
+	int nex;
+	uint32_t expected_qpn = 42;
+	uint32_t expected_qkey = 0xABCD;
 
-	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
-	assert_non_null(resource->hints);
-
-	resource->hints->caps = FI_MSG;
-
-	/* enable zero-copy recv mode in ep */
-	test_efa_rdm_ep_use_zcpy_rx_impl(resource, false, true, true);
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
 
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 
-	/* Construct a recv buffer with mr */
-	efa_unit_test_buff_construct(&recv_buff, resource, 16);
+	assert_int_equal(fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len), 0);
+	raw_addr.qpn = 0;
+	raw_addr.qkey = 0x1234;
+	assert_int_equal(fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL), 1);
 
-	for (i = 0; i < efa_rdm_ep->base_ep.info->rx_attr->size; i++)
-		assert_int_equal(fi_recv(resource->ep, recv_buff.buff, recv_buff.size, fi_mr_desc(recv_buff.mr), FI_ADDR_UNSPEC, NULL), 0);
+	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
+	assert_non_null(peer);
 
-	/* we should have rx number of rx entry before and after the extra recv post */
-	assert_true(efa_unit_test_get_dlist_length(&efa_rdm_ep->rxe_list) == efa_rdm_ep->base_ep.info->rx_attr->size);
-	assert_int_equal(fi_recv(resource->ep, recv_buff.buff, recv_buff.size, fi_mr_desc(recv_buff.mr), FI_ADDR_UNSPEC, NULL), -FI_EAGAIN);
-	assert_true(efa_unit_test_get_dlist_length(&efa_rdm_ep->rxe_list) == efa_rdm_ep->base_ep.info->rx_attr->size);
+	/* Construct a handshake packet that mimics an old peer with zcpy enabled */
+	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
+	assert_non_null(pkt_entry);
+	efa_rdm_ep->efa_rx_pkts_posted = efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
-	/**
-	 * the buf is still posted to rdma-core, so unregistering mr can
-	 * return non-zero. Currently ignore this failure.
-	 */
-	(void) fi_close(&recv_buff.mr->fid);
-	free(recv_buff.buff);
+	nex = (EFA_RDM_NUM_EXTRA_FEATURE_OR_REQUEST - 1) / 64 + 1;
+	handshake_hdr = (struct efa_rdm_handshake_hdr *)pkt_entry->wiredata;
+	handshake_hdr->type = EFA_RDM_HANDSHAKE_PKT;
+	handshake_hdr->version = EFA_RDM_PROTOCOL_VERSION;
+	handshake_hdr->nextra_p3 = nex + 3;
+	handshake_hdr->flags = 0;
+	memset(handshake_hdr->extra_info, 0, nex * sizeof(uint64_t));
+	/* Old peer advertises USER_RECV_QP */
+	handshake_hdr->extra_info[0] |= EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP;
+	pkt_entry->pkt_size = sizeof(struct efa_rdm_handshake_hdr) + nex * sizeof(uint64_t);
+
+	/* Append connid header (always present) */
+	{
+		struct efa_rdm_handshake_opt_connid_hdr *connid_hdr =
+			(struct efa_rdm_handshake_opt_connid_hdr *)(pkt_entry->wiredata + pkt_entry->pkt_size);
+		connid_hdr->connid = 0x1234;
+		handshake_hdr->flags |= EFA_RDM_PKT_CONNID_HDR;
+		pkt_entry->pkt_size += sizeof(*connid_hdr);
+	}
+
+	/* Append device_version header */
+	{
+		struct efa_rdm_handshake_opt_device_version_hdr *dv_hdr =
+			(struct efa_rdm_handshake_opt_device_version_hdr *)(pkt_entry->wiredata + pkt_entry->pkt_size);
+		dv_hdr->device_version = 0xefa1;
+		handshake_hdr->flags |= EFA_RDM_HANDSHAKE_DEVICE_VERSION_HDR;
+		pkt_entry->pkt_size += sizeof(*dv_hdr);
+	}
+
+	/* Append user_recv_qp header (as old peer would) */
+	user_recv_qp_hdr = (struct efa_rdm_handshake_opt_user_recv_qp_hdr *)(pkt_entry->wiredata + pkt_entry->pkt_size);
+	user_recv_qp_hdr->qpn = expected_qpn;
+	user_recv_qp_hdr->qkey = expected_qkey;
+	handshake_hdr->flags |= EFA_RDM_HANDSHAKE_USER_RECV_QP_HDR;
+	pkt_entry->pkt_size += sizeof(*user_recv_qp_hdr);
+
+	pkt_entry->peer = peer;
+
+	/* Process the handshake */
+	efa_rdm_pke_handle_handshake_recv(pkt_entry);
+
+	/* Verify peer's user_recv_qp was parsed correctly */
+	assert_true(peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP);
+	assert_int_equal(peer->user_recv_qp.qpn, expected_qpn);
+	assert_int_equal(peer->user_recv_qp.qkey, expected_qkey);
+	assert_true(peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED);
+}
+
+/**
+ * @brief [Backwards compat] Verify that when a handshake is received from a
+ * new peer (no USER_RECV_QP), the peer's user_recv_qp is NOT populated and
+ * efa_rdm_peer_expects_zero_hdr_data_transfer returns false.
+ */
+void test_efa_rdm_ep_handshake_receive_peer_no_user_recv_qp(struct efa_resource **state)
+{
+	fi_addr_t peer_addr = 0;
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(raw_addr);
+	struct efa_rdm_peer *peer;
+	struct efa_resource *resource = *state;
+	struct efa_unit_test_handshake_pkt_attr pkt_attr = {0};
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_pke *pkt_entry;
+
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	assert_int_equal(fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len), 0);
+	raw_addr.qpn = 0;
+	raw_addr.qkey = 0x1234;
+	assert_int_equal(fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL), 1);
+
+	peer = efa_rdm_ep_get_peer(efa_rdm_ep, peer_addr);
+	assert_non_null(peer);
+
+	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
+	assert_non_null(pkt_entry);
+	efa_rdm_ep->efa_rx_pkts_posted = efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
+
+	pkt_attr.connid = 0x1234;
+	pkt_attr.device_version = 0xefa1;
+	efa_unit_test_construct_handshake_pkt_for_receive(pkt_entry, &pkt_attr);
+
+	pkt_entry->peer = peer;
+	efa_rdm_pke_handle_handshake_recv(pkt_entry);
+
+	/* New peer should NOT have USER_RECV_QP */
+	assert_false(peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP);
+	assert_false(efa_rdm_peer_expects_zero_hdr_data_transfer(peer));
+	assert_int_equal(peer->user_recv_qp.qpn, 0);
+	assert_int_equal(peer->user_recv_qp.qkey, 0);
 }
 
 /**
@@ -1393,16 +1275,18 @@ void test_efa_rdm_ep_rx_refill_impl(struct efa_resource **state, int threshold, 
 	                                            resource->hints, true, true);
 
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
-	assert_int_equal(efa_rdm_ep_get_rx_pool_size(efa_rdm_ep), rx_size);
+	assert_int_equal(efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep), rx_size);
 
 	/* Grow the rx pool and post rx pkts */
 	efa_rdm_ep_post_internal_rx_pkts(efa_rdm_ep);
-	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, efa_rdm_ep_get_rx_pool_size(efa_rdm_ep));
+	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep));
 
 	assert_int_equal(efa_rdm_ep->efa_rx_pkts_to_post, 0);
 	for (i = 0; i < 4; i++) {
 		pkt_entry = ofi_bufpool_get_ibuf(efa_rdm_ep->efa_rx_pkt_pool, i);
 		assert_non_null(pkt_entry);
+		/* Simulate packet consumption - decrement posted count */
+		efa_rdm_ep->efa_rx_pkts_posted--;
 		efa_rdm_pke_release_rx(pkt_entry);
 	}
 	assert_int_equal(efa_rdm_ep->efa_rx_pkts_to_post, 4);
@@ -1414,16 +1298,19 @@ void test_efa_rdm_ep_rx_refill_impl(struct efa_resource **state, int threshold, 
 	 * pkts should NOT be refilled
 	 */
 	assert_int_equal(efa_rdm_ep->efa_rx_pkts_to_post, 4);
-	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, rx_size);
+	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, rx_size - 4);
 
 	/* releasing more pkts to reach the threshold or rx_size*/
 	for (i = 4; i < MIN(rx_size, threshold); i++) {
 		pkt_entry = ofi_bufpool_get_ibuf(efa_rdm_ep->efa_rx_pkt_pool, i);
 		assert_non_null(pkt_entry);
+		/* Simulate packet consumption - decrement posted count */
+		efa_rdm_ep->efa_rx_pkts_posted--;
 		efa_rdm_pke_release_rx(pkt_entry);
 	}
 
-	assert_int_equal(efa_rdm_ep->efa_rx_pkts_to_post, i);
+	assert_int_equal(efa_rdm_ep->efa_rx_pkts_to_post, MIN(rx_size, threshold));
+	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, rx_size - MIN(rx_size, threshold));
 
 	efa_rdm_ep_bulk_post_internal_rx_pkts(efa_rdm_ep);
 
@@ -1432,7 +1319,7 @@ void test_efa_rdm_ep_rx_refill_impl(struct efa_resource **state, int threshold, 
 	 * pkts should be refilled
 	 */
 	assert_int_equal(efa_rdm_ep->efa_rx_pkts_to_post, 0);
-	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, rx_size + i);
+	assert_int_equal(efa_rdm_ep->efa_rx_pkts_posted, rx_size);
 
 	/* recover the original value */
 	efa_env.internal_rx_refill_threshold = threshold_orig;
@@ -1727,8 +1614,6 @@ void test_efa_ep_bind_and_enable(struct efa_resource **state)
 	efa_ep = container_of(resource->ep, struct efa_base_ep, util_ep.ep_fid);
 
 	assert_true(efa_ep->efa_qp_enabled);
-	/* we shouldn't have user recv qp for efa-direct */
-	assert_true(efa_ep->user_recv_qp == NULL);
 }
 
 #if HAVE_EFA_DATA_PATH_DIRECT
@@ -1771,9 +1656,6 @@ void test_efa_ep_data_path_direct_equal_to_cq_data_path_direct_impl(struct efa_r
 	assert_int_equal(fi_enable(ep), 0);
 
 	assert_true(efa_ep->qp->data_path_direct_enabled == data_path_direct_enabled);
-
-	if (efa_ep->user_recv_qp)
-		assert_true(efa_ep->qp->data_path_direct_enabled == data_path_direct_enabled);
 
 	assert_int_equal(fi_close(&ep->fid), 0);
 
@@ -2001,30 +1883,6 @@ void test_efa_direct_ep_setopt_cq_flow_control_with_rx_cq_data(struct efa_resour
 }
 
 /**
- * @brief Test fi_enable failure when efa_ah_alloc returns NULL
- *
- * This test verifies that when efa_ah_alloc fails (returns NULL),
- * the fi_enable call properly returns -FI_EINVAL.
- *
- * @param[in] state cmocka state variable
- */
-void test_efa_base_ep_enable_ah_alloc_failure(struct efa_resource **state)
-{
-	struct efa_resource *resource = *state;
-	int ret;
-
-	/* Construct endpoint but don't enable it yet */
-	efa_unit_test_resource_construct_ep_not_enabled(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
-
-	/* Mock efa_ah_alloc to return NULL to simulate failure */
-	g_efa_unit_test_mocks.efa_ah_alloc = &efa_mock_efa_ah_alloc_return_null;
-
-	/* Attempt to enable the endpoint - should fail with -FI_EINVAL */
-	ret = fi_enable(resource->ep);
-	assert_int_equal(ret, -FI_EINVAL);
-}
-
-/**
  * @brief Test fi_enable failure when efa_ah_alloc returns NULL for RDM fabric
  *
  * @param[in] state cmocka state variable
@@ -2039,6 +1897,27 @@ void test_efa_rdm_ep_enable_ah_alloc_failure(struct efa_resource **state)
 
 	/* Mock efa_ah_alloc to return NULL to simulate failure */
 	g_efa_unit_test_mocks.efa_ah_alloc = &efa_mock_efa_ah_alloc_return_null;
+
+	/* Attempt to enable the endpoint - should fail with -FI_EINVAL */
+	ret = fi_enable(resource->ep);
+	assert_int_equal(ret, -FI_EINVAL);
+}
+
+/**
+ * @brief Test fi_enable failure when ibv_create_ah returns NULL for RDM fabric
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_rdm_ep_ibv_create_ah_failure(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	int ret;
+
+	/* Construct endpoint but don't enable it yet */
+	efa_unit_test_resource_construct_ep_not_enabled(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	/* Mock ibv_create_ah to return NULL to simulate failure */
+	g_efa_unit_test_mocks.ibv_create_ah = &efa_mock_ibv_create_ah_return_null;
 
 	/* Attempt to enable the endpoint - should fail with -FI_EINVAL */
 	ret = fi_enable(resource->ep);
@@ -2120,4 +1999,226 @@ void test_efa_rdm_ep_outstanding_tx_ops_decremented_with_error_completion(struct
 
 	/* Verify that outstanding_tx_ops was decremented despite the error */
 	assert_int_equal(efa_rdm_ep->efa_outstanding_tx_ops, 0);
+}
+
+/**
+ * @brief Common helper function to test efa_base_ep_construct_ibv_qp_init_attr_ex
+ *
+ * @param[in] resource Test resource
+ * @param[in] fabric_name Fabric name (EFA_FABRIC_NAME or EFA_DIRECT_FABRIC_NAME)
+ */
+static void test_efa_base_ep_construct_ibv_qp_init_attr_ex_use_requested_limits(
+	struct efa_resource *resource,
+	char *fabric_name)
+{
+	struct efa_base_ep *efa_base_ep;
+	struct ibv_qp_init_attr_ex attr_ex = {0};
+	struct efa_cq *efa_cq;
+	/* Use values that are within device limits */
+	const uint32_t tx_size = 256;
+	const uint32_t rx_size = 512;
+
+	/* Create hints with specific values */
+	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, fabric_name);
+	assert_non_null(resource->hints);
+	resource->hints->tx_attr->size = tx_size;
+	resource->hints->rx_attr->size = rx_size;
+
+	/* Construct endpoint with the specific hints */
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM, FI_VERSION(1, 14),
+	                                            resource->hints, false, true);
+
+	efa_base_ep = container_of(resource->ep, struct efa_base_ep, util_ep.ep_fid);
+	efa_cq = container_of(resource->cq, struct efa_cq, util_cq.cq_fid);
+
+	/* Verify that base_ep->info contains the hint values */
+	assert_int_equal(efa_base_ep->info->tx_attr->size, tx_size);
+	assert_int_equal(efa_base_ep->info->rx_attr->size, rx_size);
+
+	/* Call the function under test */
+	efa_base_ep_construct_ibv_qp_init_attr_ex(efa_base_ep, &attr_ex, 
+							  efa_cq->ibv_cq.ibv_cq_ex, efa_cq->ibv_cq.ibv_cq_ex);
+
+	/* Since requested values are within device limits, QP attrs should match requested values */
+	assert_int_equal(attr_ex.cap.max_send_wr, tx_size);
+	assert_int_equal(attr_ex.cap.max_recv_wr, rx_size);
+
+	/* Verify other fields are set correctly */
+	assert_int_equal(attr_ex.qp_type, IBV_QPT_DRIVER);
+	assert_int_equal(attr_ex.cap.max_inline_data, efa_base_ep->domain->device->efa_attr.inline_buf_size);
+	assert_ptr_equal(attr_ex.pd, efa_base_ep->domain->ibv_pd);
+	assert_ptr_equal(attr_ex.qp_context, efa_base_ep);
+	assert_int_equal(attr_ex.sq_sig_all, 1);
+	assert_ptr_equal(attr_ex.send_cq, ibv_cq_ex_to_cq(efa_cq->ibv_cq.ibv_cq_ex));
+	assert_ptr_equal(attr_ex.recv_cq, ibv_cq_ex_to_cq(efa_cq->ibv_cq.ibv_cq_ex));
+}
+
+/**
+ * @brief Test efa_base_ep_construct_ibv_qp_init_attr_ex with EFA-direct fabric
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_base_ep_construct_ibv_qp_init_attr_ex_efa_direct_use_requested_limits(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+
+	test_efa_base_ep_construct_ibv_qp_init_attr_ex_use_requested_limits(resource, EFA_DIRECT_FABRIC_NAME);
+}
+
+/**
+ * @brief Test efa_base_ep_construct_ibv_qp_init_attr_ex with EFA fabric
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_base_ep_construct_ibv_qp_init_attr_ex_efa_use_requested_limits(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+
+	test_efa_base_ep_construct_ibv_qp_init_attr_ex_use_requested_limits(resource, EFA_FABRIC_NAME);
+}
+
+/**
+ * @brief Test efa_rdm_ep_get_explicit_shm_fi_addr with valid peer having same GID
+ *
+ * @param[in] state struct efa_resource managed by the framework
+ */
+void test_efa_rdm_ep_get_explicit_shm_fi_addr(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(raw_addr);
+	fi_addr_t peer_addr;
+	fi_addr_t shm_addr;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	/* Create and register a fake peer with same GID (local peer) */
+	assert_int_equal(fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len), 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	assert_int_equal(fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL), 1);
+
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	/* Test with valid peer address that has same GID */
+	shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, peer_addr);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+
+	/* Verify the function returns a valid shm_fi_addr */
+	assert_int_not_equal(shm_addr, FI_ADDR_NOTAVAIL);
+}
+
+/**
+ * @brief Test efa_rdm_ep_get_explicit_shm_fi_addr without shm resources
+ *
+ * @param[in] state struct efa_resource managed by the framework
+ */
+void test_efa_rdm_ep_get_explicit_shm_fi_addr_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_ep_addr raw_addr = {0};
+	size_t raw_addr_len = sizeof(raw_addr);
+	fi_addr_t peer_addr;
+	fi_addr_t shm_addr;
+
+	/* Construct without shm resources */
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	/* Create and register a fake peer */
+	assert_int_equal(fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len), 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	assert_int_equal(fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL), 1);
+
+	/* Test the function returns FI_ADDR_NOTAVAIL when no shm resources */
+	ofi_genlock_lock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	shm_addr = efa_rdm_ep_get_explicit_shm_fi_addr(efa_rdm_ep, peer_addr);
+	ofi_genlock_unlock(&efa_rdm_ep->base_ep.domain->srx_lock);
+	assert_int_equal(shm_addr, FI_ADDR_NOTAVAIL);
+}
+
+/**
+ * @brief Test efa_base_ep_construct_ibv_qp_init_attr_ex with EFA fabric when user doesn't request smaller limits
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_base_ep_construct_ibv_qp_init_attr_ex_efa_use_device_limits(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_base_ep *efa_base_ep;
+	struct ibv_qp_init_attr_ex attr_ex = {0};
+	struct efa_cq *efa_cq;
+	struct fi_info *device_info;
+
+	/* Create hints without specifying tx/rx sizes - will use fabric defaults */
+	resource->hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
+	assert_non_null(resource->hints);
+	/* Don't set tx_attr->size, tx_attr->iov_limit, rx_attr->size, rx_attr->iov_limit
+	 * so they will use fabric defaults which can be larger than device limits */
+
+	/* Construct endpoint with the default hints */
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM, FI_VERSION(1, 14),
+	                                            resource->hints, false, true);
+
+	efa_base_ep = container_of(resource->ep, struct efa_base_ep, util_ep.ep_fid);
+	efa_cq = container_of(resource->cq, struct efa_cq, util_cq.cq_fid);
+
+	/* Get device info for comparison */
+	device_info = efa_base_ep->domain->device->rdm_info;
+
+	/* Verify that base_ep->info contains fabric default values (same as resource->info) */
+	assert_int_equal(efa_base_ep->info->tx_attr->size, resource->info->tx_attr->size);
+	assert_int_equal(efa_base_ep->info->tx_attr->iov_limit, resource->info->tx_attr->iov_limit);
+	assert_int_equal(efa_base_ep->info->rx_attr->size, resource->info->rx_attr->size);
+	assert_int_equal(efa_base_ep->info->rx_attr->iov_limit, resource->info->rx_attr->iov_limit);
+
+	/* Call the function under test */
+	efa_base_ep_construct_ibv_qp_init_attr_ex(efa_base_ep, &attr_ex, 
+							  efa_cq->ibv_cq.ibv_cq_ex, efa_cq->ibv_cq.ibv_cq_ex);
+
+	/* Since EFA fabric limits can be equal or larger than device limits,
+	 * QP attrs should use device limits (the smaller of the two) */
+	assert_int_equal(attr_ex.cap.max_send_wr, device_info->tx_attr->size);
+	assert_int_equal(attr_ex.cap.max_send_sge, device_info->tx_attr->iov_limit);
+	assert_int_equal(attr_ex.cap.max_recv_wr, device_info->rx_attr->size);
+	assert_int_equal(attr_ex.cap.max_recv_sge, device_info->rx_attr->iov_limit);
+
+	/* Verify other fields are set correctly */
+	assert_int_equal(attr_ex.qp_type, IBV_QPT_DRIVER);
+	assert_int_equal(attr_ex.cap.max_inline_data, efa_base_ep->domain->device->efa_attr.inline_buf_size);
+	assert_ptr_equal(attr_ex.pd, efa_base_ep->domain->ibv_pd);
+	assert_ptr_equal(attr_ex.qp_context, efa_base_ep);
+	assert_int_equal(attr_ex.sq_sig_all, 1);
+	assert_ptr_equal(attr_ex.send_cq, ibv_cq_ex_to_cq(efa_cq->ibv_cq.ibv_cq_ex));
+	assert_ptr_equal(attr_ex.recv_cq, ibv_cq_ex_to_cq(efa_cq->ibv_cq.ibv_cq_ex));
+}
+
+/**
+ * @brief Verify efa_base_ep_construct properly initializes info and util_ep
+ *
+ * This validates that the cleanup code added for the efa_recv_wr_vec calloc
+ * failure path doesn't break the normal path.
+ */
+void test_efa_base_ep_construct_info_and_util_ep_initialized(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct fid_ep *ep = NULL;
+	int ret;
+
+	efa_unit_test_resource_construct_no_cq_and_ep_not_enabled(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	/* Force calloc to fail when nmemb == sizeof(struct efa_recv_wr) */
+	g_efa_unit_test_mocks.calloc_fail_nmemb = sizeof(struct efa_recv_wr);
+
+	ret = fi_endpoint(resource->domain, resource->info, &ep, NULL);
+	assert_int_equal(ret, -FI_ENOMEM);
+	assert_null(ep);
+
+	/* Reset the mock */
+	g_efa_unit_test_mocks.calloc_fail_nmemb = 0;
 }

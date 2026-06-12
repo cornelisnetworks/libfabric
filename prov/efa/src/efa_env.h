@@ -18,7 +18,6 @@ struct efa_env {
 	int tx_min_credits;
 	int tx_queue_size;
 	int use_zcpy_rx;
-	int zcpy_rx_seed;
 	int enable_shm_transfer;
 	int shm_av_size;
 	int recvwin_size;
@@ -75,6 +74,17 @@ struct efa_env {
 	 * Value of 0 means there is no limit on the size.
 	 */
 	size_t implicit_av_size;
+	/**
+	 * Enable tracking of memory registrations to detect if any outstanding
+	 * operations still reference an MR when it is closed.
+	 */
+	int track_mr;
+	int use_hw_cntr;
+	/**
+	 * Enable high PPS (packets per second) optimization hints.
+	 * This feature allows applications to provide hints for burst PPS sensitive workloads.
+	 */
+	int enable_high_pps;
 };
 
 extern struct efa_env efa_env;

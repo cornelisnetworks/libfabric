@@ -120,9 +120,9 @@ ssize_t efa_rdm_pke_init_rtm_with_payload(struct efa_rdm_pke *pkt_entry,
 		if (data_size + segment_offset < txe->total_len) {
 			if (efa_mr_is_cuda(txe->desc[0])) {
 				if (txe->ep->sendrecv_in_order_aligned_128_bytes)
-					data_size &= ~(EFA_RDM_IN_ORDER_ALIGNMENT - 1);
+					data_size &= ~(EFA_RDM_EP_IN_ORDER_ALIGNMENT - 1);
 				else
-					data_size &= ~(EFA_RDM_CUDA_MEMORY_ALIGNMENT -1);
+					data_size &= ~(EFA_RDM_EP_CUDA_MEMORY_ALIGNMENT -1);
 			}
 		}
 	}
@@ -479,6 +479,15 @@ void efa_rdm_pke_handle_rtm_rta_recv(struct efa_rdm_pke *pkt_entry)
 				"Invalid msg_id: %" PRIu32
 				" robuf->exp_msg_id: %" PRIu32 "\n",
 			       msg_id, peer->robuf.exp_msg_id);
+
+#if ENABLE_DEBUG
+			/* Print debug info on reorder error */
+			EFA_WARN(FI_LOG_EP_CTRL,
+			         "  pkt_entry=%p gen=%u\n"
+			         "  Debug info history:\n",
+			         pkt_entry, pkt_entry->gen);
+			efa_rdm_pke_print_debug_info(pkt_entry);
+#endif
 			efa_base_ep_write_eq_error(&ep->base_ep, ret, FI_EFA_ERR_PKT_ALREADY_PROCESSED);
 			efa_rdm_pke_release_rx(pkt_entry);
 			return;

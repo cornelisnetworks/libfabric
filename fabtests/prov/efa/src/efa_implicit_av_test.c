@@ -487,6 +487,6 @@ int main(int argc, char **argv)
 			return ret;
 	}
 
-	ft_free_res();
+	ret = ft_free_res();
 	return ft_exit_code(ret);
 }

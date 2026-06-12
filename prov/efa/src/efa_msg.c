@@ -51,6 +51,8 @@ static inline ssize_t efa_post_recv(struct efa_base_ep *base_ep, const struct fi
 	struct efa_qp *qp = base_ep->qp;
 	struct ibv_recv_wr *bad_wr;
 	struct ibv_recv_wr *wr;
+	struct efa_context *efa_ctx;
+	struct efa_direct_ope *direct_ope = NULL;
 	uintptr_t addr;
 	ssize_t err, post_recv_err;
 	size_t i, wr_index;
@@ -92,8 +94,20 @@ static inline ssize_t efa_post_recv(struct efa_base_ep *base_ep, const struct fi
 	wr = &base_ep->efa_recv_wr_vec[wr_index].wr;
 	wr->num_sge = msg->iov_count;
 	wr->sg_list = base_ep->efa_recv_wr_vec[wr_index].sge;
-	wr->wr_id = (uintptr_t) efa_fill_context(msg->context, msg->addr, flags,
-						 FI_RECV | FI_MSG);
+	efa_ctx = efa_fill_context(msg->context, msg->addr, flags,
+				   FI_RECV | FI_MSG);
+	if (efa_env.track_mr && efa_ctx) {
+		direct_ope = efa_direct_ope_alloc(base_ep, efa_ctx, msg, NULL);
+		if (!direct_ope) {
+			EFA_WARN(FI_LOG_EP_DATA,
+				 "Failed to allocate direct RX operation entry for MR tracking\n");
+			err = -FI_EAGAIN;
+			goto out_err;
+		}
+		wr->wr_id = (uintptr_t) direct_ope;
+	} else {
+		wr->wr_id = (uintptr_t) efa_ctx;
+	}
 
 	for (i = 0; i < msg->iov_count; i++) {
 		addr = (uintptr_t)msg->msg_iov[i].iov_base;
@@ -153,6 +167,8 @@ out_err:
 
 	base_ep->recv_wr_index = 0;
 
+	if (direct_ope)
+		efa_direct_ope_release(base_ep, direct_ope);
 	ofi_genlock_unlock(&base_ep->util_ep.lock);
 
 	return err;
@@ -195,17 +211,21 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 	struct efa_conn *conn;
 	struct ibv_sge sg_list[2];  /* efa device support up to 2 iov */
 	struct ibv_data_buf inline_data_list[2];
+	struct efa_context *efa_ctx;
+	struct efa_direct_ope *direct_ope = NULL;
 	size_t len, i;
-	bool use_inline;
+	size_t iov_count = msg->iov_count;
+	bool use_inline, len_fits_inline, is_hmem;
 	int ret = 0;
 	uintptr_t wr_id;
 
 	efa_tracepoint(send_begin_msg_context, (size_t) msg->context, (size_t) msg->addr);
 
+	len = ofi_total_iov_len(msg->msg_iov, msg->iov_count);
+
 	EFA_DBG(FI_LOG_EP_DATA,
 		"total len: %zu, addr: %lu, context: %lx, flags: %lx\n",
-		ofi_total_iov_len(msg->msg_iov, msg->iov_count),
-		msg->addr, (size_t) msg->context, flags);
+		len, msg->addr, (size_t) msg->context, flags);
 
 	dump_msg(msg, "send");
 
@@ -213,8 +233,6 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 	assert(conn && conn->ep_addr);
 
 	assert(msg->iov_count <= base_ep->info->tx_attr->iov_limit);
-
-	len = ofi_total_iov_len(msg->msg_iov, msg->iov_count);
 
 	if (qp->ibv_qp->qp_type == IBV_QPT_UD) {
 		assert(msg->msg_iov[0].iov_len >= base_ep->info->ep_attr->msg_prefix_size);
@@ -226,14 +244,41 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 	ofi_genlock_lock(&base_ep->util_ep.lock);
 
 	/* Prepare work request ID */
-	wr_id = (uintptr_t) efa_fill_context(
-		msg->context, msg->addr, flags, FI_SEND | FI_MSG);
+	efa_ctx = efa_fill_context(msg->context, msg->addr, flags,
+				   FI_SEND | FI_MSG);
+	if (efa_env.track_mr && efa_ctx) {
+		direct_ope = efa_direct_ope_alloc(base_ep, efa_ctx, msg, NULL);
+		if (!direct_ope) {
+			EFA_WARN(FI_LOG_EP_DATA,
+				 "Failed to allocate direct TX operation entry for MR tracking\n");
+			ret = -FI_EAGAIN;
+			goto out_err;
+		}
+		wr_id = (uintptr_t) direct_ope;
+	} else {
+		wr_id = (uintptr_t) efa_ctx;
+	}
+
+	/* Handle 0-byte send with inline path and 0 SGEs */
+	if (len == 0) {
+		iov_count = 0;
+		use_inline = true;
+		goto post;
+	}
 
 	/* Determine if we should use inline data */
-	use_inline = (len <= base_ep->domain->device->efa_attr.inline_buf_size &&
-		      (!msg->desc || !efa_mr_is_hmem(msg->desc[0])));
-
-	if (use_inline) {
+	len_fits_inline = len <= base_ep->domain->device->efa_attr.inline_buf_size;
+	is_hmem = false;
+	if (msg->desc) {
+		for (i = 0; i < msg->iov_count; i++) {
+			if (efa_mr_is_hmem(msg->desc[i])) {
+				is_hmem = true;
+				break;
+			}
+		}
+	}
+	if (len_fits_inline && !is_hmem) {
+		use_inline = true;
 		/* Prepare inline data list */
 		for (i = 0; i < msg->iov_count; i++) {
 			inline_data_list[i].addr = msg->msg_iov[i].iov_base;
@@ -246,6 +291,21 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 			}
 		}
 	} else {
+		use_inline = false;
+		if (flags & FI_INJECT) {
+			if (!len_fits_inline)
+				EFA_WARN(FI_LOG_EP_DATA,
+					 "FI_INJECT is requested but message "
+					 "size of %zu exceeds efa-direct "
+					 "inject_msg_size of %zu.\n", len,
+					 base_ep->inject_msg_size);
+			if (is_hmem)
+				EFA_WARN(FI_LOG_EP_DATA,
+					 "FI_INJECT is not supported for "
+					 "FI_HMEM memory.\n");
+			ret = -FI_EOPNOTSUPP;
+			goto out_err;
+		}
 		/* Prepare SGE list */
 		for (i = 0; i < msg->iov_count; i++) {
 			/* Set TX buffer desc from SGE */
@@ -268,8 +328,9 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 		}
 	}
 
+post:
 	/* Use consolidated send function */
-	ret = efa_qp_post_send(qp, sg_list, inline_data_list, msg->iov_count,
+	ret = efa_qp_post_send(qp, sg_list, inline_data_list, iov_count,
 			       use_inline, wr_id, msg->data, flags,
 			       conn->ah, conn->ep_addr->qpn, conn->ep_addr->qkey);
 	if (OFI_UNLIKELY(ret))
@@ -278,7 +339,10 @@ static inline ssize_t efa_post_send(struct efa_base_ep *base_ep, const struct fi
 	efa_tracepoint(post_send, wr_id, (uintptr_t)msg->context);
 
 out_err:
+	if (direct_ope)
+		efa_direct_ope_release(base_ep, direct_ope);
 	ofi_genlock_unlock(&base_ep->util_ep.lock);
+
 	return ret;
 }
 
@@ -333,8 +397,6 @@ static ssize_t efa_ep_msg_inject(struct fid_ep *ep_fid, const void *buf, size_t 
 	struct fi_msg msg;
 	struct iovec iov;
 
-	assert(len <= base_ep->domain->device->efa_attr.inline_buf_size);
-
 	EFA_SETUP_IOV(iov, buf, len);
 	EFA_SETUP_MSG(msg, &iov, NULL, 1, dest_addr, NULL, 0);
 
@@ -348,8 +410,6 @@ static ssize_t efa_ep_msg_injectdata(struct fid_ep *ep_fid, const void *buf,
 	struct efa_base_ep *base_ep = container_of(ep_fid, struct efa_base_ep, util_ep.ep_fid);
 	struct fi_msg msg;
 	struct iovec iov;
-
-	assert(len <= base_ep->domain->device->efa_attr.inline_buf_size);
 
 	EFA_SETUP_IOV(iov, buf, len);
 	EFA_SETUP_MSG(msg, &iov, NULL, 1, dest_addr, NULL, data);

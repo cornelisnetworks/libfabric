@@ -99,8 +99,7 @@ efa_av_reverse_lookup_rdm_conn(struct efa_cur_reverse_av **cur_reverse_av,
 	if (OFI_UNLIKELY(!cur_entry))
 		return NULL;
 
-	if (!pkt_entry ||
-	    (pkt_entry->alloc_type == EFA_RDM_PKE_FROM_USER_RX_POOL)) {
+	if (!pkt_entry) {
 		/**
 		 * There is no packet entry to extract connid from when we get
 		 * an IBV_WC_RECV_RDMA_WITH_IMM completion from rdma-core. Or
@@ -307,7 +306,7 @@ void efa_av_reverse_av_remove(struct efa_cur_reverse_av **cur_reverse_av,
 	cur_key.qpn = conn->ep_addr->qpn;
 	HASH_FIND(hh, *cur_reverse_av, &cur_key, sizeof(cur_key),
 		  cur_reverse_av_entry);
-	if (cur_reverse_av_entry) {
+	if (cur_reverse_av_entry && cur_reverse_av_entry->conn == conn) {
 		HASH_DEL(*cur_reverse_av, cur_reverse_av_entry);
 		free(cur_reverse_av_entry);
 	} else {
@@ -317,7 +316,8 @@ void efa_av_reverse_av_remove(struct efa_cur_reverse_av **cur_reverse_av,
 		prv_key.connid = conn->ep_addr->qkey;
 		HASH_FIND(hh, *prv_reverse_av, &prv_key, sizeof(prv_key),
 			  prv_reverse_av_entry);
-		assert(prv_reverse_av_entry);
+		assert(prv_reverse_av_entry &&
+		       prv_reverse_av_entry->conn == conn);
 		HASH_DEL(*prv_reverse_av, prv_reverse_av_entry);
 		free(prv_reverse_av_entry);
 	}
@@ -644,11 +644,13 @@ static int efa_av_lookup(struct fid_av *av_fid, fi_addr_t fi_addr,
 
 	ofi_genlock_lock(&av->util_av.lock);
 	conn = efa_av_addr_to_conn(av, fi_addr);
-	ofi_genlock_unlock(&av->util_av.lock);
-	if (!conn)
+	if (!conn) {
+		ofi_genlock_unlock(&av->util_av.lock);
 		return -FI_EINVAL;
+	}
 
 	memcpy(addr, (void *)conn->ep_addr, MIN(EFA_EP_ADDR_LEN, *addrlen));
+	ofi_genlock_unlock(&av->util_av.lock);
 	if (*addrlen > EFA_EP_ADDR_LEN)
 		*addrlen = EFA_EP_ADDR_LEN;
 	return 0;

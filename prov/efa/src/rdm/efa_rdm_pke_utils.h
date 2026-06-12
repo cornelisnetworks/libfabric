@@ -133,24 +133,24 @@ size_t efa_rdm_pke_get_segment_offset(struct efa_rdm_pke *pke)
  * @return   		length of data copied.
  */
 static inline size_t
-efa_rdm_pke_copy_from_hmem_iov(struct efa_mr *iov_mr, struct efa_rdm_pke *pke,
+efa_rdm_pke_copy_from_hmem_iov(struct efa_rdm_mr *iov_mr, struct efa_rdm_pke *pke,
 			       struct efa_rdm_ope *ope, size_t payload_offset,
 			       size_t segment_offset, size_t data_size)
 {
 	size_t copied;
 
-	if (iov_mr && (iov_mr->peer.flags & OFI_HMEM_DATA_DEV_REG_HANDLE)) {
-		assert(iov_mr->peer.hmem_data);
+	if (iov_mr && (iov_mr->flags & OFI_HMEM_DATA_DEV_REG_HANDLE)) {
+		assert(iov_mr->hmem_data);
 		copied = ofi_dev_reg_copy_from_hmem_iov(pke->wiredata + payload_offset,
-							data_size, iov_mr->peer.iface,
-							(uint64_t)iov_mr->peer.hmem_data,
+							data_size, iov_mr->efa_mr.iface,
+							(uint64_t)iov_mr->hmem_data,
 							ope->iov, ope->iov_count,
 							segment_offset);
 	} else {
 		copied = ofi_copy_from_hmem_iov(pke->wiredata + payload_offset,
 		                                data_size,
-		                                iov_mr ? iov_mr->peer.iface : FI_HMEM_SYSTEM,
-		                                iov_mr ? iov_mr->peer.device : 0,
+		                                iov_mr ? iov_mr->efa_mr.iface : FI_HMEM_SYSTEM,
+		                                iov_mr ? iov_mr->device : 0,
 		                                ope->iov, ope->iov_count, segment_offset);
 	}
 
@@ -184,31 +184,22 @@ efa_rdm_pke_post_remote_read_or_nack(struct efa_rdm_ep *ep,
 	p2p_avail = err;
 	if (p2p_avail) {
 		err = efa_rdm_ope_post_remote_read_or_queue(rxe);
-	} else if (ep->homogeneous_peers || efa_rdm_peer_support_read_nack(rxe->peer)) {
+	} else {
 		EFA_INFO(FI_LOG_EP_CTRL,
 			 "Receiver sending long read "
 			 "NACK packet because P2P is not available, "
 			 "unable to post RDMA read.\n");
 		goto send_nack;
-	} else {
-		EFA_INFO(FI_LOG_EP_CTRL, "P2P is not available, "
-					 "unable to post RDMA read.\n");
-		return -FI_EOPNOTSUPP;
 	}
 
+	/* If posting RDMA read fails becaue we've exhausted MRs, fall back to
+	 * read NACK */
 	if (err == -FI_ENOMR) {
-		if (ep->homogeneous_peers || efa_rdm_peer_support_read_nack(rxe->peer)) {
-			EFA_INFO(FI_LOG_EP_CTRL, "Receiver sending long read "
-						 "NACK packet because memory "
-						 "registration limit was "
-						 "reached on the receiver.\n");
-			goto send_nack;
-		} else {
-			/* Peer does not support the READ_NACK packet. So we
-			 * return EAGAIN and hope that the app runs progress
-			 * again which will free some MR registrations */
-			return -FI_EAGAIN;
-		}
+		EFA_INFO(FI_LOG_EP_CTRL, "Receiver sending long read "
+					 "NACK packet because memory "
+					 "registration limit was "
+					 "reached on the receiver.\n");
+		goto send_nack;
 	}
 
 	return err;
@@ -243,7 +234,7 @@ ssize_t efa_rdm_pke_copy_payload_to_ope(struct efa_rdm_pke *pke,
 uint32_t *efa_rdm_pke_connid_ptr(struct efa_rdm_pke *pkt_entry);
 
 int efa_rdm_pke_get_available_copy_methods(struct efa_rdm_ep *ep,
-					   struct efa_mr *efa_mr,
+					   struct efa_rdm_mr *efa_rdm_mr,
 					   bool *restrict local_read_available,
 					   bool *restrict cuda_memcpy_available,
 					   bool *restrict gdrcopy_available);

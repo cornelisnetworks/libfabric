@@ -4,10 +4,12 @@
 #ifndef _FI_EXT_EFA_H_
 #define _FI_EXT_EFA_H_
 
+#include <stdbool.h>
 #include <rdma/fi_domain.h>
 
 #define FI_EFA_DOMAIN_OPS "efa domain ops"
 #define FI_EFA_GDA_OPS "efa gda ops"
+#define FI_EFA_FEATURE_OPS "efa feature ops"
 
 struct fi_efa_mr_attr {
     uint16_t ic_id_validity;
@@ -50,6 +52,38 @@ struct fi_efa_cq_init_attr {
 	} ext_mem_dmabuf;
 };
 
+/* mirror efadv_memory_location_type */
+enum fi_efa_memory_location_type {
+	FI_EFA_MEMORY_LOCATION_VA,
+	FI_EFA_MEMORY_LOCATION_DMABUF,
+};
+
+/* mirror efadv_memory_location */
+struct fi_efa_memory_location {
+	uint8_t *ptr;
+	struct {
+		uint64_t offset;
+		int32_t fd;
+		uint32_t reserved;
+	} dmabuf;
+	uint8_t type; /* Use fi_efa_memory_location_type */
+	uint8_t reserved[7];
+};
+
+enum {
+	FI_EFA_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM = 1 << 0,
+	FI_EFA_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM = 1 << 1,
+};
+
+/* mirror efadv_comp_cntr_init_attr */
+struct fi_efa_comp_cntr_init_attr {
+	uint64_t comp_mask;
+	uint32_t flags;
+	uint32_t reserved;
+	struct fi_efa_memory_location comp_cntr_ext_mem;
+	struct fi_efa_memory_location err_cntr_ext_mem;
+};
+
 struct fi_efa_ops_domain {
 	int (*query_mr)(struct fid_mr *mr, struct fi_efa_mr_attr *mr_attr);
 };
@@ -66,6 +100,42 @@ struct fi_efa_ops_gda {
 			   struct fi_efa_cq_init_attr *efa_cq_init_attr,
 			   struct fid_cq **cq_fid, void *context);
 	uint64_t (*get_mr_lkey)(struct fid_mr *mr);
+	int (*cntr_open_ext)(struct fid_domain *domain,
+			     struct fi_cntr_attr *attr,
+			     struct fid_cntr **cntr,
+			     void *context,
+			     struct fi_efa_comp_cntr_init_attr *efa_attr);
 };
+
+/*
+ * EFA feature flags
+ *
+ * Features are runtime-discoverable flags advertised by the provider,
+ * letting consumers detect the presence of a given behavior or bug fix
+ * independently of the libfabric API version (which cannot encode
+ * patch releases).
+ *
+ * Currently defined feature strings:
+ *
+ *   "mixed_hmem_iov" - the provider correctly inspects every descriptor
+ *                      in a multi-iov request for HMEM/iface, rather
+ *                      than only the first descriptor.
+ */
+struct fi_efa_feature_ops {
+	bool (*query)(const char *feature);
+};
+
+
+/**
+ * EFA provider specific op flags (60 - 63 bits)
+ * See rdma/fabric.h for 0-59 bit that apply to all providers
+ */
+
+ /*
+ * Hint the device to optimize for higher message rate for rdma operations.
+ * This flag can be passed in the 'flags' argument of data transfer calls
+ * such as fi_writemsg().
+ */
+#define FI_EFA_WR_HIGH_PPS (1ULL << 60)
 
 #endif /* _FI_EXT_EFA_H_ */

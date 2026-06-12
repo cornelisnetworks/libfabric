@@ -105,7 +105,7 @@ void test_efa_srx_unexp_pkt(struct efa_resource **state)
 				EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pke);
 	efa_rdm_ep->efa_rx_pkts_posted =
-		efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+		efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
 	/* Create a fake peer */
 	/* TODO: peer must be constructed by CQ read path */
@@ -144,4 +144,223 @@ void test_efa_srx_unexp_pkt(struct efa_resource **state)
 
 	/* Destroy the fake peer constructed above */
 	efa_rdm_peer_destruct(&peer, efa_rdm_ep);
+}
+
+/**
+ * @brief Test that util_foreach_unspec only processes entries belonging to the
+ * calling provider's fid_peer_srx, and skips entries from other providers.
+ *
+ * Both owner and peer providers queue messages from unknown peers into the same
+ * unspec queue, with peer_entry.srx assigned to its own fid_peer_srx. During
+ * fi_av_insert that calls util_foreach_unspec to scan this queue, each provider
+ * should only process entries from its own provider and ignore entries from the
+ * other one.
+ */
+static fi_addr_t test_foreach_unspec_get_addr(struct fi_peer_rx_entry *entry)
+{
+	/* Return a valid address so the entry gets moved out of unspec queue */
+	return 0;
+}
+
+static int test_foreach_unspec_discard_no_op(struct fi_peer_rx_entry *entry)
+{
+	return FI_SUCCESS;
+}
+
+void test_efa_srx_foreach_unspec_skips_other_provider(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct util_srx_ctx *srx_ctx;
+	struct util_rx_entry *msg_entry_efa, *msg_entry_shm;
+	struct util_rx_entry *tag_entry_efa, *tag_entry_shm;
+	struct fid_peer_srx *efa_srx;
+	struct fid_peer_srx *shm_srx;
+	struct fi_ops_srx_peer *efa_peer_ops;
+	struct fi_ops_srx_peer *shm_peer_ops;
+	int (*saved_efa_discard_msg)(struct fi_peer_rx_entry *);
+	int (*saved_efa_discard_tag)(struct fi_peer_rx_entry *);
+	int (*saved_shm_discard_msg)(struct fi_peer_rx_entry *);
+	int (*saved_shm_discard_tag)(struct fi_peer_rx_entry *);
+	struct util_rx_entry *remaining_msg;
+	struct util_rx_entry *remaining_tag;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep,
+				  base_ep.util_ep.ep_fid);
+	srx_ctx = efa_rdm_ep_get_peer_srx_ctx(efa_rdm_ep);
+	efa_srx = &srx_ctx->peer_srx;
+	shm_srx = efa_rdm_ep->shm_peer_srx;
+
+	/* Enable directed receive so foreach_unspec will move resolved entries */
+	srx_ctx->dir_recv = true;
+
+	ofi_genlock_lock(srx_ctx->lock);
+
+	/* Allocate entries for the unspec msg queue */
+	msg_entry_efa = (struct util_rx_entry *) ofi_buf_alloc(srx_ctx->rx_pool);
+	assert_non_null(msg_entry_efa);
+	msg_entry_efa->peer_entry.srx = efa_srx;
+	msg_entry_efa->peer_entry.addr = FI_ADDR_UNSPEC;
+	msg_entry_efa->peer_entry.flags = FI_MSG | FI_RECV;
+	msg_entry_efa->status = RX_ENTRY_UNEXP;
+
+	msg_entry_shm = (struct util_rx_entry *) ofi_buf_alloc(srx_ctx->rx_pool);
+	assert_non_null(msg_entry_shm);
+	msg_entry_shm->peer_entry.srx = shm_srx;
+	msg_entry_shm->peer_entry.addr = FI_ADDR_UNSPEC;
+	msg_entry_shm->peer_entry.flags = FI_MSG | FI_RECV;
+	msg_entry_shm->status = RX_ENTRY_UNEXP;
+
+	/* Allocate entries for the unspec tag queue */
+	tag_entry_efa = (struct util_rx_entry *) ofi_buf_alloc(srx_ctx->rx_pool);
+	assert_non_null(tag_entry_efa);
+	tag_entry_efa->peer_entry.srx = efa_srx;
+	tag_entry_efa->peer_entry.addr = FI_ADDR_UNSPEC;
+	tag_entry_efa->peer_entry.flags = FI_TAGGED | FI_RECV;
+	tag_entry_efa->status = RX_ENTRY_UNEXP;
+
+	tag_entry_shm = (struct util_rx_entry *) ofi_buf_alloc(srx_ctx->rx_pool);
+	assert_non_null(tag_entry_shm);
+	tag_entry_shm->peer_entry.srx = shm_srx;
+	tag_entry_shm->peer_entry.addr = FI_ADDR_UNSPEC;
+	tag_entry_shm->peer_entry.flags = FI_TAGGED | FI_RECV;
+	tag_entry_shm->status = RX_ENTRY_UNEXP;
+
+	/* Insert all entries into the unspec queues */
+	dlist_insert_tail(&msg_entry_efa->d_entry,
+			  &srx_ctx->unspec_unexp_msg_queue);
+	dlist_insert_tail(&msg_entry_shm->d_entry,
+			  &srx_ctx->unspec_unexp_msg_queue);
+	dlist_insert_tail(&tag_entry_efa->d_entry,
+			  &srx_ctx->unspec_unexp_tag_queue);
+	dlist_insert_tail(&tag_entry_shm->d_entry,
+			  &srx_ctx->unspec_unexp_tag_queue);
+
+	assert_int_equal(efa_unit_test_get_dlist_length(
+				 &srx_ctx->unspec_unexp_msg_queue), 2);
+	assert_int_equal(efa_unit_test_get_dlist_length(
+				 &srx_ctx->unspec_unexp_tag_queue), 2);
+
+	/* Call foreach_unspec with efa_srx - should only process efa entries */
+	efa_srx->owner_ops->foreach_unspec_addr(efa_srx,
+						&test_foreach_unspec_get_addr);
+
+	/*
+	 * After foreach_unspec, the efa entries should have been moved out
+	 * (address resolved), while the shm provider's entries should remain
+	 * in the unspec queues.
+	 */
+	assert_int_equal(efa_unit_test_get_dlist_length(
+				 &srx_ctx->unspec_unexp_msg_queue), 1);
+	assert_int_equal(efa_unit_test_get_dlist_length(
+				 &srx_ctx->unspec_unexp_tag_queue), 1);
+
+	/* Verify the remaining entries belong to the shm provider */
+	remaining_msg = container_of(srx_ctx->unspec_unexp_msg_queue.next,
+				     struct util_rx_entry, d_entry);
+	assert_ptr_equal(remaining_msg->peer_entry.srx, shm_srx);
+
+	remaining_tag = container_of(srx_ctx->unspec_unexp_tag_queue.next,
+				     struct util_rx_entry, d_entry);
+	assert_ptr_equal(remaining_tag->peer_entry.srx, shm_srx);
+
+	/* Clean up: use shm_srx foreach_unspec to move shm entries out */
+	shm_srx->owner_ops->foreach_unspec_addr(shm_srx,
+						&test_foreach_unspec_get_addr);
+
+	assert_int_equal(efa_unit_test_get_dlist_length(
+				 &srx_ctx->unspec_unexp_msg_queue), 0);
+	assert_int_equal(efa_unit_test_get_dlist_length(
+				 &srx_ctx->unspec_unexp_tag_queue), 0);
+
+	/*
+	 * Replace discard_msg/discard_tag with no-ops on both efa and shm
+	 * peer_ops before ep close, since our test entries don't have valid
+	 * pkt_entry pointers. Save the original function pointers so we
+	 * can restore them before closing.
+	 */
+	efa_peer_ops = efa_srx->peer_ops;
+	shm_peer_ops = shm_srx->peer_ops;
+	saved_efa_discard_msg = efa_peer_ops->discard_msg;
+	saved_efa_discard_tag = efa_peer_ops->discard_tag;
+	saved_shm_discard_msg = shm_peer_ops->discard_msg;
+	saved_shm_discard_tag = shm_peer_ops->discard_tag;
+
+	efa_peer_ops->discard_msg = test_foreach_unspec_discard_no_op;
+	efa_peer_ops->discard_tag = test_foreach_unspec_discard_no_op;
+	shm_peer_ops->discard_msg = test_foreach_unspec_discard_no_op;
+	shm_peer_ops->discard_tag = test_foreach_unspec_discard_no_op;
+
+	ofi_genlock_unlock(srx_ctx->lock);
+
+	/* ep close will call util_srx_close which drains remaining entries */
+	fi_close(&resource->ep->fid);
+	resource->ep = NULL;
+
+	/* Restore original discard ops using saved function pointers */
+	efa_peer_ops->discard_msg = saved_efa_discard_msg;
+	efa_peer_ops->discard_tag = saved_efa_discard_tag;
+	shm_peer_ops->discard_msg = saved_shm_discard_msg;
+	shm_peer_ops->discard_tag = saved_shm_discard_tag;
+}
+
+/**
+ * @brief Verify that peer_construct returns 0 on success (validates new int return type)
+ *
+ * After changing peer_construct from void to int, verify that the normal
+ * path still works correctly and returns 0.
+ */
+void test_efa_rdm_peer_construct_robuf_failure(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_peer peer = {0};
+	struct efa_ep_addr raw_addr;
+	struct efa_conn conn = {0};
+	fi_addr_t peer_addr;
+	size_t raw_addr_len = sizeof(raw_addr);
+	struct ofi_bufpool *saved_pool;
+	struct ofi_bufpool *tiny_pool;
+	void *buf;
+	int ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 99;
+	raw_addr.qkey = 0xABCD;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &peer_addr, 0, NULL);
+	assert_int_equal(ret, 1);
+
+	conn.ep_addr = &raw_addr;
+	conn.fi_addr = peer_addr;
+
+	/* Create a tiny pool with max_cnt=1 and exhaust it */
+	ret = ofi_bufpool_create(&tiny_pool,
+				 efa_rdm_ep->peer_robuf_pool->entry_size,
+				 EFA_RDM_BUFPOOL_ALIGNMENT, 1 /* max_cnt */,
+				 1, 0);
+	assert_int_equal(ret, 0);
+	ret = ofi_bufpool_grow(tiny_pool);
+	assert_int_equal(ret, 0);
+	buf = ofi_buf_alloc(tiny_pool);
+	assert_non_null(buf);
+
+	/* Swap in the exhausted pool */
+	saved_pool = efa_rdm_ep->peer_robuf_pool;
+	efa_rdm_ep->peer_robuf_pool = tiny_pool;
+
+	/* peer_construct should fail with -FI_ENOMEM */
+	ret = efa_rdm_peer_construct(&peer, efa_rdm_ep, &conn);
+	assert_int_equal(ret, -FI_ENOMEM);
+
+	/* Restore and cleanup */
+	efa_rdm_ep->peer_robuf_pool = saved_pool;
+	ofi_buf_free(buf);
+	ofi_bufpool_destroy(tiny_pool);
 }

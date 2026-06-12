@@ -85,15 +85,33 @@ The following features are supported:
   application. The `efa-direct` fabric of *FI_EP_RDM* endpint and the *FI_EP_DGRAM* endpoint only supports *FI_MR_LOCAL*.
 
 *Progress*
-: RDM and DGRAM endpoints support *FI_PROGRESS_MANUAL*.
-  EFA erroneously claims the support for *FI_PROGRESS_AUTO*, despite not properly
-  supporting automatic progress. Unfortunately, some Libfabric consumers also ask
-  for *FI_PROGRESS_AUTO* when they only require *FI_PROGRESS_MANUAL*, and fixing
-  this bug would break those applications. This will be fixed in a future version
-  of the EFA provider by adding proper support for *FI_PROGRESS_AUTO*.
+: The *FI_EP_RDM* endpoint in the `efa` fabric supports *FI_PROGRESS_MANUAL*.
+  The *FI_EP_RDM* and *FI_EP_DGRAM* endpoints in the `efa-direct` fabric
+  support *FI_PROGRESS_AUTO*. See
+  [efa_fabric_comparison](https://github.com/ofiwg/libfabric/blob/main/prov/efa/docs/efa_fabric_comparison.md)
+  for a detailed comparison of `efa` vs `efa-direct` fabrics.
 
 *Threading*
 : Both RDM and DGRAM endpoints supports *FI_THREAD_SAFE*.
+
+*Completion counters*
+: The `efa-direct` fabric supports hardware completion counters backed by
+  MSI-X(Message Signaled Interrupts Extended) hardware counters on the EFA device.
+
+  Hardware counters are created via the `cntr_open_ext` GDA domain op
+  (see below). When a hardware counter is bound to an endpoint, it is
+  automatically attached to the QP when the endpoint is enabled. 
+  The counter is implicitly detached when the EP it is attached 
+  to is destroyed. The counter cannot be closed while it is still 
+  attached to any EP; the EP must be closed first.
+
+  *fi_cntr_read*, *fi_cntr_readerr*, and *fi_cntr_wait* are not
+  supported on the host for GPU memory-backed counters.
+
+  Hardware counters do not internally poll the completion queue.
+  When an operation returns *-FI_EAGAIN*, the application must call *fi_cq_read* to 
+  make progress and free CQ space before retrying the operation, regardless of whether 
+  FI_SELECTIVE_COMPLETION is set. Failure to do so will result in CQ overrun.
 
 # LIMITATIONS
 
@@ -112,16 +130,13 @@ The following features are supported:
   applies to the `efa` fabric when the `FI_OPT_EFA_HOMOGENEOUS_PEERS` option
   is set as `true`.
 
-## [Zero-copy receive mode](https://github.com/ofiwg/libfabric/blob/main/prov/efa/docs/efa_rdm_protocol_v4.md#48-user-receive-qp-feature--request-and-zero-copy-receive)
- - Zero-copy receive mode can be enabled only if SHM transfer is disabled.
- - Unless the application explicitly disables P2P, e.g. via FI_HMEM_P2P_DISABLED,
-  zero-copy receive can be enabled only if available FI_HMEM devices all have
-  P2P support.
-  
 ## `fi_cancel` support
  - `fi_cancel` is only supported in the non-zero-copy-receive mode of the `efa` fabric.
  It's not supported in `efa-direct`, DGRAM endpoint, and the zero-copy receive mode of
  the `efa` fabric in RDM endpoint.
+
+## (Deprecated) [Zero-copy receive mode](https://github.com/ofiwg/libfabric/blob/main/prov/efa/docs/efa_rdm_protocol_v4.md#48-user-receive-qp-feature--request-and-zero-copy-receive)
+ - Support for the zero-copy mode was deprecated in Libfabric v2.6
 
 When using FI_HMEM for AWS Neuron or Habana SynapseAI buffers, the provider
 requires peer to peer transaction support between the EFA and the FI_HMEM
@@ -194,10 +209,21 @@ provider for AWS Neuron or Habana SynapseAI.
   For efa-direct, FI_RX_CQ_DATA is required when FI_OPT_EFA_USE_UNSOLICITED_WRITE_RECV
   is false, or it will return -FI_EOPNOTSUPP for the call to fi_setopt().
 
-# PROVIDER SPECIFIC DOMAIN OPS
-The efa provider exports extensions for operations
-that are not provided by the standard libfabric interface. These extensions
-are available via the "`fi_ext_efa.h`" header file.
+# PROVIDER SPECIFIC OPERATION FLAGS
+
+The EFA provider defines provider-specific operation flags that can be passed
+in the `flags` argument of data transfer calls such as `fi_writemsg()`.
+
+*FI_EFA_WR_HIGH_PPS*
+: This flag can be passed in the `flags` argument of RDMA write operations
+  (e.g., `fi_writemsg()`) to hint the device to optimize for higher message
+  rate.
+
+# PROVIDER SPECIFIC OPERATION EXTENSIONS
+The efa provider exports extensions for operations that are not provided
+by the standard libfabric interface. These extensions are available via
+the "`fi_ext_efa.h`" header file and accessed through `fi_open_ops`,
+applied to either the domain or fabric fid depending on the extension.
 
 ## Domain Operation Extension
 
@@ -271,6 +297,11 @@ struct fi_efa_ops_gda {
 			   struct fi_efa_cq_init_attr *efa_cq_init_attr,
 			   struct fid_cq **cq_fid, void *context);
 	uint64_t (*get_mr_lkey)(struct fid_mr *mr);
+	int (*cntr_open_ext)(struct fid_domain *domain,
+			     struct fi_cntr_attr *attr,
+			     struct fid_cntr **cntr,
+			     void *context,
+			     struct fi_efa_comp_cntr_init_attr *efa_attr);
 };
 ```
 
@@ -397,6 +428,140 @@ Returns the local memory translation key associated with a MR. The memory regist
 
 #### Return value
 **get_mr_lkey()** returns lkey on success, or FI_KEY_NOTAVAIL if the registration has not completed.
+
+### cntr_open_ext
+This op creates a completion counter backed by a MSI-X hardware counter.
+Applications must check `FI_VERSION_GE(fi_version(), FI_VERSION(2, 5))` before
+calling `cntr_open_ext`, as older libfabric versions do not include this
+function pointer in the domain ops structure.
+
+When the *FI_EFA_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM* or
+*FI_EFA_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM* flag is set in
+`fi_efa_comp_cntr_init_attr.flags`, the application provides its own memory for
+the completion or error count via the `comp_cntr_ext_mem` or `err_cntr_ext_mem`
+fields respectively. The external memory is described by a
+`fi_efa_memory_location` structure which supports two modes: a virtual address
+(*FI_EFA_MEMORY_LOCATION_VA*), where the application supplies a direct pointer,
+or a DMA-BUF reference (*FI_EFA_MEMORY_LOCATION_DMABUF*), where the application
+supplies a file descriptor and offset into an exported DMA-BUF. When using
+DMA-BUF, the `ptr` field may also be set to provide a process-accessible
+mapping of the memory, which may enable more efficient counter reads. Using
+external memory allows the counter values to reside in application-managed
+buffers or in memory exported through DMA-BUF, enabling zero-copy observation
+of completion progress by co-located processes or devices.
+The default counter events type is `FI_CNTR_EVENTS_COMP`.
+
+Counter memory supplied by the application must not be modified directly, or the
+resulting counter value will be non-deterministic. Counter values must only be
+updated using fi_cntr* APIs.
+Only *FI_WAIT_NONE* and *FI_WAIT_UNSPEC* are supported as wait objects in
+`fi_cntr_attr`.
+
+```c
+enum fi_efa_memory_location_type {
+	FI_EFA_MEMORY_LOCATION_VA,
+	FI_EFA_MEMORY_LOCATION_DMABUF,
+};
+
+struct fi_efa_memory_location {
+	uint8_t *ptr;
+	struct {
+		uint64_t offset;
+		int32_t fd;
+		uint32_t reserved;
+	} dmabuf;
+	uint8_t type;
+	uint8_t reserved[7];
+};
+
+struct fi_efa_comp_cntr_init_attr {
+	uint64_t comp_mask;
+	uint32_t flags;
+	uint32_t reserved;
+	struct fi_efa_memory_location comp_cntr_ext_mem;
+	struct fi_efa_memory_location err_cntr_ext_mem;
+};
+```
+
+*comp_mask*
+:	Compatibility mask.
+
+*flags*
+:	A bitwise OR of the following values:
+
+	FI_EFA_COMP_CNTR_INIT_WITH_COMP_EXTERNAL_MEM:
+		Use application-provided memory for the completion count, as
+		described by `comp_cntr_ext_mem`.
+
+	FI_EFA_COMP_CNTR_INIT_WITH_ERR_EXTERNAL_MEM:
+		Use application-provided memory for the error count, as
+		described by `err_cntr_ext_mem`.
+
+*comp_cntr_ext_mem*
+:	Memory location for the completion count when using external memory.
+
+*err_cntr_ext_mem*
+:	Memory location for the error count when using external memory.
+
+*type*
+:	The type of memory location. `FI_EFA_MEMORY_LOCATION_VA` for a virtual address,
+	or `FI_EFA_MEMORY_LOCATION_DMABUF` for a DMA-BUF reference.
+
+*ptr*
+:	Virtual address pointer. Required when type is `FI_EFA_MEMORY_LOCATION_VA`.
+	When type is `FI_EFA_MEMORY_LOCATION_DMABUF`, may optionally be set to provide
+	a process-accessible mapping of the DMA-BUF memory. Otherwise should be NULL.
+
+*dmabuf.fd*
+:	DMA-BUF file descriptor (used when type is `FI_EFA_MEMORY_LOCATION_DMABUF`).
+
+*dmabuf.offset*
+:	Offset within the DMA-BUF.
+
+#### Return value
+**cntr_open_ext()** returns 0 on success, or a negative value on failure.
+
+
+## Fabric Operation Extension
+
+Fabric operation extension is obtained by calling `fi_open_ops`
+(see [`fi_fabric(3)`](fi_fabric.3.html))
+```c
+int fi_open_ops(struct fid *fabric, const char *name, uint64_t flags,
+    void **ops, void *context);
+```
+
+Requesting `FI_EFA_FEATURE_OPS` in `name` returns `ops` as a pointer to the
+function table `fi_efa_feature_ops` defined as follows:
+
+```c
+struct fi_efa_feature_ops {
+	bool (*query)(const char *feature);
+};
+```
+
+Features are runtime-discoverable flags advertised by the provider,
+letting consumers detect the presence of a given behavior or bug fix
+independently of the libfabric API version (which cannot encode patch
+releases). The ops are exposed at fabric scope so consumers can probe
+features immediately after `fi_fabric()`, before any domain is opened.
+Feature answers may differ between the `efa-direct` and `efa` (RDM)
+fabrics because the two exercise different code paths. Older provider
+builds do not expose `FI_EFA_FEATURE_OPS` at all, so `fi_open_ops()`
+returns `-FI_EINVAL` for the key; callers can treat that as "no
+features advertised".
+
+Currently defined feature strings:
+
+*"mixed_hmem_iov"* (efa-direct only)
+:	The provider correctly inspects every descriptor in a multi-iov
+	request for HMEM/iface, rather than only the first descriptor.
+	Not currently advertised on the `efa` fabric because the RDM
+	receive-copy path still dispatches on `desc[0]` alone.
+
+### query
+Return `true` if the provider build advertises *feature*, otherwise
+`false`. Passing an unknown string (including `NULL`) returns `false`.
 
 
 # Traffic Class (tclass) in EFA
@@ -541,6 +706,13 @@ the refill will be skipped.
 
 : Use the direct data path implementation that bypasses rdma-core on data path, including the CQ polling and TX/RX submissions, when it's available.
 Setting this variable as 0 will disable this feature (Default: true).
+
+*FI_EFA_TRACK_MR*
+
+: Enable tracking of memory registrations to detect if any outstanding operations
+still reference an MR when it is closed. When enabled, the provider will print
+a warning message if an MR is closed while TX or RX operations still reference it.
+This is useful for debugging memory registration issues. (Default: false).
 
 # SEE ALSO
 

@@ -37,6 +37,7 @@
 
 #include <stdlib.h>
 #include <inttypes.h>
+#include <time.h>
 #include <netinet/tcp.h>
 #include <sys/uio.h>
 #include <stdbool.h>
@@ -51,6 +52,14 @@
 
 #include "ofi_atomic.h"
 
+#ifdef __GNUC__
+    #define FT_LIKELY(x)   __builtin_expect(!!(x), 1)
+    #define FT_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+    #define FT_LIKELY(x)   (x)
+    #define FT_UNLIKELY(x) (x)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,6 +67,8 @@ extern "C" {
 #ifndef FT_FIVERSION
 #define FT_FIVERSION FI_VERSION(1,21)
 #endif
+
+extern uint32_t ft_fiversion;
 
 #include "ft_osd.h"
 #define OFI_UTIL_PREFIX "ofi_"
@@ -365,8 +376,9 @@ static inline int ft_use_size(int index, int enable_flags)
 #define FT_LOG(level, fmt, ...)						\
 	do {								\
 		int saved_errno = errno;				\
-		fprintf(stderr, "[%s] fabtests:%s:%d: " fmt "\n",	\
-			level, __FILE__, __LINE__, ##__VA_ARGS__);	\
+		fprintf(stderr, "[%s] %ld:fabtests:%s:%d: " fmt "\n",	\
+			level, (long)time(NULL), __FILE__,		\
+			__LINE__, ##__VA_ARGS__);			\
 		errno = saved_errno;					\
 	} while (0)
 
@@ -409,6 +421,20 @@ static inline int ft_use_size(int index, int enable_flags)
 		}							\
 	} while (0)
 
+#define FT_CLOSE_FID_RET(fd, ret)					\
+	do {								\
+		(ret) = 0;						\
+		if ((fd)) {						\
+			(ret) = fi_close(&(fd)->fid);			\
+			if ((ret))					\
+				FT_ERR("fi_close: %s(%d) fid %d",	\
+					fi_strerror(-(ret)),		\
+					(ret),				\
+					(int) (fd)->fid.fclass);	\
+			fd = NULL;					\
+		}							\
+	} while (0)
+
 #define FT_CLOSEV_FID(fd, cnt)			\
 	do {					\
 		int i;				\
@@ -439,7 +465,7 @@ int ft_getinfo(struct fi_info *hints, struct fi_info **info);
 int ft_init_fabric();
 int ft_init_oob();
 int ft_close_oob();
-void ft_close_fids();
+int ft_close_fids();
 int ft_reset_oob();
 int ft_start_server();
 int ft_server_connect();
@@ -458,7 +484,7 @@ int ft_alloc_ep_res(struct fi_info *fi, struct fid_cq **new_txcq,
 		    struct fid_av **new_av);
 int ft_alloc_msgs(void);
 int ft_alloc_host_bufs(size_t size);
-void ft_free_host_bufs(void);
+int ft_free_host_bufs(void);
 int ft_alloc_active_res(struct fi_info *fi);
 int ft_enable_ep_recv(void);
 int ft_enable_ep(struct fid_ep *bind_ep, struct fid_eq *bind_eq, struct fid_av *bind_av,
@@ -495,7 +521,7 @@ int ft_reg_mr(struct fi_info *info, void *buf, size_t size, uint64_t access,
 	      uint64_t key, enum fi_hmem_iface iface, uint64_t device,
 	      struct fid_mr **mr, void **desc);
 void ft_freehints(struct fi_info *hints);
-void ft_free_res();
+int ft_free_res();
 void init_test(struct ft_opts *opts, char *test_name, size_t test_name_len);
 
 static inline uint64_t ft_gettime_ns(void)

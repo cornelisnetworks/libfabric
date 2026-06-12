@@ -3,6 +3,7 @@
 
 #include "efa_unit_tests.h"
 #include "efa_cq.h"
+
 /**
  * @brief Verify the info type in struct efa_domain for efa RDM path
  *
@@ -31,6 +32,122 @@ void test_efa_domain_info_type_efa_direct(struct efa_resource **state)
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
 	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
 	assert_true(efa_domain->info_type == EFA_INFO_DIRECT);
+}
+
+/**
+ * @brief Verify bounce buffer is allocated for efa-direct domain
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_direct_has_bounce_buffer(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+
+	if (efa_domain->info->caps & FI_RMA) {
+		assert_non_null(efa_domain->zero_byte_bounce_buf);
+		assert_non_null(efa_domain->zero_byte_bounce_buf_mr);
+		assert_non_null(efa_domain->zero_byte_bounce_buf_mr->ibv_mr);
+	} else {
+		assert_null(efa_domain->zero_byte_bounce_buf);
+		assert_null(efa_domain->zero_byte_bounce_buf_mr);
+	}
+}
+
+/**
+ * @brief Verify bounce buffer is NOT allocated for efa RDM domain
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_rdm_no_bounce_buffer(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+	assert_null(efa_domain->zero_byte_bounce_buf);
+	assert_null(efa_domain->zero_byte_bounce_buf_mr);
+}
+
+/* Internal structures from libibverbs/driver.h - needed to access MR access flags */
+enum ibv_mr_type {
+	IBV_MR_TYPE_MR,
+	IBV_MR_TYPE_NULL_MR,
+	IBV_MR_TYPE_IMPORTED_MR,
+	IBV_MR_TYPE_DMABUF_MR,
+};
+
+struct verbs_mr {
+	struct ibv_mr ibv_mr;
+	enum ibv_mr_type mr_type;
+	int access;
+};
+
+/**
+ * @brief Verify bounce buffer is NOT allocated when FI_RMA is not requested
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_no_bounce_buffer_without_fi_rma_cap_requested(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+	struct fi_info *hints, *info;
+
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	hints->caps &= ~FI_RMA;
+	assert_int_equal(fi_getinfo(FI_VERSION(1, 14), NULL, NULL, 0ULL, hints, &info), 0);
+
+	/* Remove FI_RMA from the returned info as well */
+	info->caps &= ~FI_RMA;
+
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM, FI_VERSION(1, 14), info, true, true);
+
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+	assert_null(efa_domain->zero_byte_bounce_buf);
+	assert_null(efa_domain->zero_byte_bounce_buf_mr);
+
+	fi_freeinfo(hints);
+	fi_freeinfo(info);
+}
+
+/**
+ * @brief Verify bounce buffer registered successfully with RDMA read and write capability
+ *        assuming platform support of rdma-read/rdma-write
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_bounce_buffer_with_rdma(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+	struct verbs_mr *vmr;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+
+	if (!(efa_domain->info->caps & FI_RMA)) {
+		assert_null(efa_domain->zero_byte_bounce_buf);
+		assert_null(efa_domain->zero_byte_bounce_buf_mr);
+		return;
+	}
+
+	assert_non_null(efa_domain->zero_byte_bounce_buf);
+	assert_non_null(efa_domain->zero_byte_bounce_buf_mr);
+	assert_non_null(efa_domain->zero_byte_bounce_buf_mr->ibv_mr);
+
+	/* Verify MR access flags - with RDMA read and write */
+	vmr = container_of(efa_domain->zero_byte_bounce_buf_mr->ibv_mr, struct verbs_mr, ibv_mr);
+
+	/* IBV_ACCESS_LOCAL_WRITE is always set for FI_RECV */
+	assert_true(vmr->access & IBV_ACCESS_LOCAL_WRITE);
+	/* FI_SEND with RDMA_READ support sets REMOTE_READ for both efa/efa-direct */
+	/* Remote Write never requested as this isn't a target buffer*/
+	assert_false(vmr->access & IBV_ACCESS_REMOTE_WRITE);
 }
 
 /* test fi_open_ops with a wrong name */
@@ -157,6 +274,21 @@ void test_efa_domain_open_ops_mr_query(struct efa_resource **state)
 
 #endif /* HAVE_EFADV_QUERY_MR */
 
+static struct fi_efa_ops_gda *efa_unit_test_construct_gda_ops(
+	struct efa_resource *resource)
+{
+	struct fi_efa_ops_gda *efa_gda_ops;
+	int ret;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+
+	ret = fi_open_ops(&resource->domain->fid, FI_EFA_GDA_OPS, 0,
+			  (void **)&efa_gda_ops, NULL);
+	assert_int_equal(ret, 0);
+
+	return efa_gda_ops;
+}
+
 
 void test_efa_domain_open_ops_query_qp_wqs(struct efa_resource **state)
 {
@@ -166,10 +298,7 @@ void test_efa_domain_open_ops_query_qp_wqs(struct efa_resource **state)
     struct fi_efa_wq_attr sq_attr = {0};
     struct fi_efa_wq_attr rq_attr = {0};
 
-    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
-
-    ret = fi_open_ops(&resource->domain->fid, FI_EFA_GDA_OPS, 0, (void **)&efa_gda_ops, NULL);
-    assert_int_equal(ret, 0);
+    efa_gda_ops = efa_unit_test_construct_gda_ops(resource);
 
 #if HAVE_EFADV_QUERY_QP_WQS
     g_efa_unit_test_mocks.efadv_query_qp_wqs = &efa_mock_efadv_query_qp_wqs;
@@ -203,10 +332,7 @@ void test_efa_domain_open_ops_query_cq(struct efa_resource **state)
     struct fi_efa_ops_gda *efa_gda_ops;
     struct fi_efa_cq_attr cq_attr = {0};
 
-    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
-
-    ret = fi_open_ops(&resource->domain->fid, FI_EFA_GDA_OPS, 0, (void **)&efa_gda_ops, NULL);
-    assert_int_equal(ret, 0);
+    efa_gda_ops = efa_unit_test_construct_gda_ops(resource);
 
 #if HAVE_EFADV_QUERY_CQ
     g_efa_unit_test_mocks.efadv_query_cq = &efa_mock_efadv_query_cq;
@@ -449,9 +575,184 @@ void test_efa_domain_open_ops_cq_open_ext(struct efa_resource **state)
 #endif
 }
 
+/**
+ * @brief Verify that EFA RDM domains use the correct MR operations
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_rdm_mr_ops(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+
+	/* RDM domains should use efa_rdm_domain_mr_ops */
+	assert_ptr_equal(efa_domain->util_domain.domain_fid.mr, &efa_rdm_domain_mr_ops);
+	assert_int_equal(efa_domain->info_type, EFA_INFO_RDM);
+}
+
+/**
+ * @brief Verify that EFA direct domains use the correct MR operations
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_direct_mr_ops(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+
+	/* EFA-direct domains should use efa_domain_mr_ops */
+	assert_ptr_equal(efa_domain->util_domain.domain_fid.mr, &efa_domain_mr_ops);
+	assert_int_equal(efa_domain->info_type, EFA_INFO_DIRECT);
+}
+
+/**
+ * @brief Verify that DGRAM domains use the correct MR operations
+ *
+ * @param[in]	state		struct efa_resource that is managed by the framework
+ */
+void test_efa_domain_dgram_mr_ops(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+
+	efa_unit_test_resource_construct(resource, FI_EP_DGRAM, EFA_FABRIC_NAME);
+	efa_domain = container_of(resource->domain, struct efa_domain, util_domain.domain_fid);
+
+	/* DGRAM domains should use efa_domain_mr_ops (core EFA MR operations) */
+	assert_ptr_equal(efa_domain->util_domain.domain_fid.mr, &efa_domain_mr_ops);
+	assert_int_equal(efa_domain->info_type, EFA_INFO_DGRAM);
+}
+
+/**
+ * @brief Common helper function to validate MR cache configuration for RDM domains
+ *
+ * @param efa_domain EFA RDM domain to test
+ * @param cache_expected Whether MR cache should be enabled
+ */
+static void test_efa_rdm_domain_mr_cache_common(struct efa_domain *efa_domain, bool cache_expected)
+{
+	struct ofi_mr_cache *cache = efa_domain->cache;
+
+	/* This helper is only for RDM domains */
+	assert_int_equal(efa_domain->info_type, EFA_INFO_RDM);
+
+	if (cache_expected) {
+		/* Test Case: MR cache should be available */
+		assert_non_null(cache);
+		assert_true(efa_is_cache_available(efa_domain));
+
+		/* Validate entry_data_size is correct for efa_rdm_mr */
+		assert_int_equal(cache->entry_data_size, sizeof(struct efa_rdm_mr));
+
+		/* Validate add_region function pointer */
+		assert_ptr_equal(cache->add_region, efa_rdm_mr_cache_entry_reg);
+
+		/* Validate delete_region function pointer */
+		assert_ptr_equal(cache->delete_region, efa_rdm_mr_cache_entry_dereg);
+	} else {
+		/* Test Case: MR cache should be disabled for RDM */
+		assert_null(cache);
+		assert_false(efa_is_cache_available(efa_domain));
+	}
+}
+
+/**
+ * @brief Test MR cache happy path: no FI_MR_LOCAL, cache enabled
+ *
+ * This test validates that when the application doesn't request FI_MR_LOCAL
+ * and efa_mr_cache_enable is true, the MR cache is properly initialized
+ * and configured with correct function pointers and data structures.
+ */
+void test_efa_domain_mr_cache_enabled(struct efa_resource **state)
+{
+#ifdef ENABLE_ASAN
+	skip();
+#else
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+	struct fi_info *hints;
+
+	/* Create hints without FI_MR_LOCAL to enable cache */
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
+	hints->domain_attr->mr_mode &= ~FI_MR_LOCAL;
+
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM,
+						    FI_VERSION(2, 0), hints, true, true);
+
+	efa_domain = container_of(resource->domain, struct efa_domain,
+				  util_domain.domain_fid);
+
+	/* Validate cache is enabled and properly configured */
+	test_efa_rdm_domain_mr_cache_common(efa_domain, true);
+	fi_freeinfo(hints);
+#endif
+}
+
+/**
+ * @brief Test MR cache disabled path: FI_MR_LOCAL requested
+ *
+ * This test validates that when the application requests FI_MR_LOCAL,
+ * the MR cache is disabled and the domain uses direct MR registration.
+ */
+void test_efa_domain_mr_cache_disabled_with_mr_local(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+	struct fi_info *hints;
+
+	/* Create hints with FI_MR_LOCAL to disable cache */
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_FABRIC_NAME);
+	hints->domain_attr->mr_mode |= FI_MR_LOCAL;
+
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM,
+						    FI_VERSION(2, 0), hints, true, true);
+
+	efa_domain = container_of(resource->domain, struct efa_domain,
+				  util_domain.domain_fid);
+
+	/* Validate cache is disabled */
+	test_efa_rdm_domain_mr_cache_common(efa_domain, false);
+	fi_freeinfo(hints);
+}
+
+/**
+ * @brief Test MR cache disabled path: EFA-direct fabric
+ *
+ * This test validates that when EFA-direct fabric is used,
+ * the MR cache is disabled regardless of FI_MR_LOCAL setting.
+ */
+void test_efa_domain_mr_cache_disabled_with_efa_direct(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_domain *efa_domain;
+	struct fi_info *hints;
+
+	/* Create hints for EFA-direct fabric */
+	hints = efa_unit_test_alloc_hints(FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+
+	efa_unit_test_resource_construct_with_hints(resource, FI_EP_RDM,
+						    FI_VERSION(2, 0), hints, true, true);
+
+	efa_domain = container_of(resource->domain, struct efa_domain,
+				  util_domain.domain_fid);
+
+	/* EFA-direct specific validations */
+	assert_int_equal(efa_domain->info_type, EFA_INFO_DIRECT);
+
+	/* Cache should be disabled for EFA-direct */
+	assert_null(efa_domain->cache);
+	assert_false(efa_is_cache_available(efa_domain));
+	fi_freeinfo(hints);
+}
+
 void test_efa_domain_open_ops_get_mr_lkey(struct efa_resource **state)
 {
-    int ret;
     struct efa_resource *resource = *state;
     struct fi_efa_ops_gda *efa_gda_ops;
     struct efa_mr mr = {0};
@@ -463,11 +764,105 @@ void test_efa_domain_open_ops_get_mr_lkey(struct efa_resource **state)
     ibv_mr.lkey = 1234567;
     mr.ibv_mr = &ibv_mr;
 
-    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
-    ret = fi_open_ops(&resource->domain->fid, FI_EFA_GDA_OPS, 0, (void **)&efa_gda_ops, NULL);
-    assert_int_equal(ret, 0);
+    efa_gda_ops = efa_unit_test_construct_gda_ops(resource);
 
     lkey = efa_gda_ops->get_mr_lkey(&mr.mr_fid);
-    assert_int_equal(ret, FI_SUCCESS);
     assert_true(lkey == mr.ibv_mr->lkey);
+}
+
+/**
+ * @brief Verify query("mixed_hmem_iov") returns true on efa-direct,
+ * which is the fabric where this feature is advertised.
+ */
+void test_efa_fabric_open_ops_feature_known(struct efa_resource **state)
+{
+    struct efa_resource *resource = *state;
+    struct fi_efa_feature_ops *feat_ops;
+    int ret;
+
+    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+
+    ret = fi_open_ops(&resource->fabric->fid, FI_EFA_FEATURE_OPS, 0,
+                      (void **) &feat_ops, NULL);
+    assert_int_equal(ret, 0);
+    assert_non_null(feat_ops->query);
+    assert_true(feat_ops->query("mixed_hmem_iov"));
+}
+
+/**
+ * @brief Verify query("mixed_hmem_iov") returns false on efa (RDM),
+ * which does not currently advertise the feature.
+ */
+void test_efa_fabric_open_ops_feature_not_on_proto(struct efa_resource **state)
+{
+    struct efa_resource *resource = *state;
+    struct fi_efa_feature_ops *feat_ops;
+    int ret;
+
+    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+    ret = fi_open_ops(&resource->fabric->fid, FI_EFA_FEATURE_OPS, 0,
+                      (void **) &feat_ops, NULL);
+    assert_int_equal(ret, 0);
+    assert_non_null(feat_ops->query);
+    assert_false(feat_ops->query("mixed_hmem_iov"));
+}
+
+/**
+ * @brief Verify query() returns false for an unknown feature and for NULL.
+ */
+void test_efa_fabric_open_ops_feature_unknown(struct efa_resource **state)
+{
+    struct efa_resource *resource = *state;
+    struct fi_efa_feature_ops *feat_ops;
+    int ret;
+
+    efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_DIRECT_FABRIC_NAME);
+
+    ret = fi_open_ops(&resource->fabric->fid, FI_EFA_FEATURE_OPS, 0,
+                      (void **) &feat_ops, NULL);
+    assert_int_equal(ret, 0);
+    assert_false(feat_ops->query("no_such_feature"));
+    assert_false(feat_ops->query(NULL));
+}
+
+/**
+ * @brief Test cntr_open_ext returns -FI_ENOSYS when efadv_create_comp_cntr is unavailable,
+ * or succeeds with mocked efadv_create_comp_cntr.
+ */
+void test_efa_domain_open_ops_cntr_open_ext(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct fi_efa_ops_gda *efa_gda_ops;
+	struct fi_cntr_attr attr = {0};
+	struct fi_efa_comp_cntr_init_attr efa_attr = {0};
+	struct fid_cntr *cntr_fid = NULL;
+	int ret;
+
+	efa_env.use_hw_cntr = 1;
+	efa_gda_ops = efa_unit_test_construct_gda_ops(resource);
+
+#if HAVE_EFADV_CREATE_COMP_CNTR
+	{
+	struct efa_domain *efa_domain;
+	efa_domain = container_of(resource->domain, struct efa_domain,
+				  util_domain.domain_fid);
+	efa_domain->device->max_comp_cntr = (1ULL << 31) - 1;
+	efa_domain->info->domain_attr->max_cntr_value = (1ULL << 31) - 1;
+	efa_domain->info->domain_attr->max_err_cntr_value = (1ULL << 31) - 1;
+	g_efa_unit_test_mocks.efadv_create_comp_cntr = efa_mock_efadv_create_comp_cntr_return_mock;
+	g_efa_unit_test_mocks.ibv_destroy_comp_cntr = efa_mock_ibv_destroy_comp_cntr_return_mock;
+	}
+#endif
+
+	attr.events = FI_CNTR_EVENTS_COMP;
+	ret = efa_gda_ops->cntr_open_ext(resource->domain, &attr, &cntr_fid,
+					  NULL, &efa_attr);
+#if HAVE_EFADV_CREATE_COMP_CNTR
+	assert_int_equal(ret, FI_SUCCESS);
+	assert_non_null(cntr_fid);
+	fi_close(&cntr_fid->fid);
+#else
+	assert_int_equal(ret, -FI_ENOSYS);
+#endif
 }

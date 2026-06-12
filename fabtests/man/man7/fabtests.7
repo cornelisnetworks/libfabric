@@ -14,7 +14,7 @@
 . ftr VB CB
 . ftr VBI CBI
 .\}
-.TH "fabtests" "7" "2025\-01\-30" "Libfabric Programmer\[cq]s Manual" "#VERSION#"
+.TH "fabtests" "7" "2026\-05\-26" "Libfabric Programmer\[cq]s Manual" "#VERSION#"
 .hy
 .SH NAME
 .PP
@@ -171,8 +171,12 @@ time, in sequence.
 .SS Benchmarks
 .PP
 The client and the server exchange messages in either a ping-pong
-manner, for pingpong named tests, or transfer messages one-way, for bw
+manner, for pingpong named tests, or bandwidth-focused transfers, for bw
 named tests.
+Most bw tests transfer messages one-way.
+One exception is \f[I]fi_rma_bw\f[R]: its read and write modes are
+bidirectional, while writedata mode is unidirectional from client to
+server.
 These tests can transfer various messages sizes, with controls over
 which features are used by the test, and report performance numbers.
 The tests are structured based on the benchmarks provided by OSU MPI.
@@ -202,12 +206,15 @@ Tagged message bandwidth test for reliable-datagram (RDM) endpoints.
 Tagged message latency test for reliable-datagram (RDM) endpoints.
 .TP
 \f[I]fi_rma_bw\f[R]
-An RMA read and write bandwidth test for reliable (MSG and RDM)
-endpoints.
+An RMA read, write and writedata bandwidth test for reliable (MSG and
+RDM) endpoints.
+Read and write modes are bidirectional by default.
+Writedata mode is unidirectional from client to server.
 .TP
 \f[I]fi_rma_pingpong\f[R]
-An RMA write and writedata latency test for reliable-datagram (RDM)
-endpoints.
+A latency test for RMA operations on reliable-datagram (RDM) endpoints.
+It measures latency in both directions for write and writedata
+operations and in only one direction for read operations.
 .SS Unit
 .PP
 These are simple one-sided unit tests that validate basic behavior of
@@ -238,6 +245,10 @@ Tests memory registration.
 .TP
 \f[I]fi_mr_cache_evict\f[R]
 Tests provider MR cache eviction capabilities.
+.TP
+\f[I]fi_nic_affinity_test\f[R]
+Validates that fi_getinfo returns correct output when the GPU-NIC
+affinity feature is enabled.
 .SS Multinode
 .PP
 This test runs a series of tests over multiple formats and patterns to

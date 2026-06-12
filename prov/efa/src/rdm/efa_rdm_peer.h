@@ -122,6 +122,7 @@ struct efa_rdm_peer {
 	 * only valid when (extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP) is non-zero
 	 */
 	struct efa_rdm_peer_user_recv_qp user_recv_qp;
+
 	struct efa_rdm_rxe_map rxe_map; 	/**< Hashmap used to match received mulreq packets with RX entries */
 };
 
@@ -176,28 +177,6 @@ bool efa_rdm_peer_support_unsolicited_write_recv(struct efa_rdm_peer *peer)
 	       (peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_UNSOLICITED_WRITE_RECV);
 }
 
-static inline
-bool efa_rdm_peer_support_delivery_complete(struct efa_rdm_peer *peer)
-{
-	/* FI_DELIVERY_COMPLETE is an extra feature defined
-	 * in version 4 (the base version).
-	 * Because it is an extra feature,
-	 * an EP will assume the peer does not support
-	 * it before a handshake packet was received.
-	 */
-	return (peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED) &&
-	       (peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_DELIVERY_COMPLETE);
-}
-
-static inline
-bool efa_rdm_peer_support_read_nack(struct efa_rdm_peer *peer)
-{
-	/* EFA_RDM_READ_NACK_PKT introduced in Libfabric 1.20
-	 */
-	return (peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED) &&
-	       (peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_READ_NACK);
-}
-
 /**
  * @brief determines whether a peer needs the endpoint to include
  * raw address int the req packet header.
@@ -241,19 +220,22 @@ bool efa_rdm_peer_need_raw_addr_hdr(struct efa_rdm_peer *peer)
  *
  * EFA uses qkey as connection ID.
  *
+ * Since libfabric 2.6, connid header is treated as a baseline request.
+ * All supported peers (v2.0+) request it, so we always include connid
+ * after handshake without checking the peer's extra_info.
+ *
  * @params[in]	peer	pointer to rdm_peer
  * @return	a boolean indicating whether the peer needs connection ID
  */
 static inline
 bool efa_rdm_peer_need_connid(struct efa_rdm_peer *peer)
 {
-	return (peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED) &&
-	       (peer->extra_info[0] & EFA_RDM_EXTRA_REQUEST_CONNID_HEADER);
+	return (peer->flags & EFA_RDM_PEER_HANDSHAKE_RECEIVED);
 }
 
 struct efa_conn;
 
-void efa_rdm_peer_construct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep, struct efa_conn *conn);
+int efa_rdm_peer_construct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep, struct efa_conn *conn);
 
 void efa_rdm_peer_destruct(struct efa_rdm_peer *peer, struct efa_rdm_ep *ep);
 

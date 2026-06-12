@@ -193,8 +193,10 @@ static int mr_key_test()
 				printf("write to host's key %lx\n",
 						(unsigned long)fi_mr_key(mr_res_array[i].mr));
 
-			ft_post_rma(FT_RMA_WRITE, tx_buf, opts.transfer_size,
+			ret = ft_post_rma(FT_RMA_WRITE, tx_buf, opts.transfer_size,
 					mr_res_array[i].remote, &rma_ctx);
+			if (ret)
+				return ret;
 
 			if (verbose)
 				printf("sent successfully\n");
@@ -242,8 +244,10 @@ static int mr_key_test()
 				printf("write to client's key %lx\n",
 						(unsigned long)fi_mr_key(mr_res_array[i].mr));
 
-			ft_post_rma(FT_RMA_WRITE, tx_buf, opts.transfer_size,
+			ret = ft_post_rma(FT_RMA_WRITE, tx_buf, opts.transfer_size,
 					mr_res_array[i].remote, &rma_ctx);
+			if (ret)
+				return ret;
 
 			if (verbose)
 					printf("sent successfully\n");
@@ -278,7 +282,7 @@ static int run_test(void)
 int main(int argc, char **argv)
 {
 	int op;
-	int ret = 0;
+	int ret = 0, cleanup_ret;
 
 	opts = INIT_OPTS;
 	opts.transfer_size = 4096;
@@ -326,6 +330,6 @@ int main(int argc, char **argv)
 	ret = run_test();
 
 	free_mr_res();
-	ft_free_res();
-	return ft_exit_code(ret);
+	cleanup_ret = ft_free_res();
+	return ft_exit_code(ret ? ret : cleanup_ret);
 }

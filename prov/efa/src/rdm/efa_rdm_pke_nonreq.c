@@ -30,7 +30,6 @@ ssize_t efa_rdm_pke_init_handshake(struct efa_rdm_pke *pkt_entry,
 	struct efa_rdm_handshake_opt_connid_hdr *connid_hdr;
 	struct efa_rdm_handshake_opt_host_id_hdr *host_id_hdr;
 	struct efa_rdm_handshake_opt_device_version_hdr *device_version_hdr;
-	struct efa_rdm_handshake_opt_user_recv_qp_hdr *user_recv_qp_hdr;
 
 	handshake_hdr = (struct efa_rdm_handshake_hdr *)pkt_entry->wiredata;
 	handshake_hdr->type = EFA_RDM_HANDSHAKE_PKT;
@@ -76,16 +75,6 @@ ssize_t efa_rdm_pke_init_handshake(struct efa_rdm_pke *pkt_entry,
 	handshake_hdr->flags |= EFA_RDM_HANDSHAKE_DEVICE_VERSION_HDR;
 	pkt_entry->pkt_size += sizeof (struct efa_rdm_handshake_opt_device_version_hdr);
 
-	/* Include the user recv qp information (qpn and qkey) */
-	if (pkt_entry->ep->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP) {
-		user_recv_qp_hdr = (struct efa_rdm_handshake_opt_user_recv_qp_hdr *) (pkt_entry->wiredata + pkt_entry->pkt_size);
-		assert(pkt_entry->ep->base_ep.user_recv_qp);
-		user_recv_qp_hdr->qpn = pkt_entry->ep->base_ep.user_recv_qp->qp_num;
-		user_recv_qp_hdr->qkey = pkt_entry->ep->base_ep.user_recv_qp->qkey;
-		handshake_hdr->flags |= EFA_RDM_HANDSHAKE_USER_RECV_QP_HDR;
-		pkt_entry->pkt_size += sizeof (struct efa_rdm_handshake_opt_user_recv_qp_hdr);
-	}
-
 	pkt_entry->peer = peer;
 	return 0;
 }
@@ -117,6 +106,20 @@ void efa_rdm_pke_handle_handshake_recv(struct efa_rdm_pke *pkt_entry)
 		   (handshake_pkt->nextra_p3 - 3) * sizeof(uint64_t));
 	peer->flags |= EFA_RDM_PEER_HANDSHAKE_RECEIVED;
 
+	if (peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP) {
+		EFA_WARN(FI_LOG_CQ,
+			 "Peer requested zero-copy receive via USER_RECV_QP "
+			 "which has been deprecated in newer Libfabric "
+			 "versions. Communication will continue. Consider "
+			 "upgrading peer to a newer Libfabric version.\n");
+		if (handshake_pkt->flags & EFA_RDM_HANDSHAKE_USER_RECV_QP_HDR) {
+			struct efa_rdm_handshake_opt_user_recv_qp_hdr *user_recv_qp_hdr;
+			user_recv_qp_hdr = efa_rdm_pke_get_handshake_opt_user_recv_qp_ptr(pkt_entry);
+			peer->user_recv_qp.qpn = user_recv_qp_hdr->qpn;
+			peer->user_recv_qp.qkey = user_recv_qp_hdr->qkey;
+		}
+	}
+
 	host_id_ptr = efa_rdm_pke_get_handshake_opt_host_id_ptr(pkt_entry);
 	if (host_id_ptr) {
 		peer->host_id = *host_id_ptr;
@@ -125,13 +128,6 @@ void efa_rdm_pke_handle_handshake_recv(struct efa_rdm_pke *pkt_entry)
 
 	peer->device_version = efa_rdm_pke_get_handshake_opt_device_version(pkt_entry);
 	EFA_INFO(FI_LOG_CQ, "Received peer EFA device version: 0x%x\n", peer->device_version);
-
-	if (peer->extra_info[0] & EFA_RDM_EXTRA_FEATURE_REQUEST_USER_RECV_QP) {
-		struct efa_rdm_handshake_opt_user_recv_qp_hdr *user_recv_qp_hdr;
-		user_recv_qp_hdr = efa_rdm_pke_get_handshake_opt_user_recv_qp_ptr(pkt_entry);
-		peer->user_recv_qp.qpn = user_recv_qp_hdr->qpn;
-		peer->user_recv_qp.qkey = user_recv_qp_hdr->qkey;
-	}
 
 	efa_rdm_pke_release_rx(pkt_entry);
 }
@@ -289,13 +285,16 @@ void efa_rdm_pke_handle_ctsdata_send_completion(struct efa_rdm_pke *pkt_entry)
 {
 	struct efa_rdm_ope *ope;
 
-	/* if this DATA packet is used by a DC protocol, the completion
-	 * was (or will be) written when the receipt packet was received.
-	 * The txe may have already been released. So nothing
-	 * to do (or can be done) here.
+	/* if this DATA packet is used by a DC protocol, the tx entry should
+	 * be only released when both all TX ops are done and the receipt
+	 * has been received.
 	 */
-	if (pkt_entry->flags & EFA_RDM_PKE_DC_LONGCTS_DATA)
+	if (pkt_entry->flags & EFA_RDM_PKE_DC_LONGCTS_DATA) {
+		assert(pkt_entry->ope);
+		if (efa_rdm_txe_dc_ready_for_release(pkt_entry->ope))
+			efa_rdm_txe_release(pkt_entry->ope);
 		return;
+	}
 
 	ope = pkt_entry->ope;
 	ope->bytes_acked += efa_rdm_pke_get_ctsdata_hdr(pkt_entry)->seg_length;
@@ -525,7 +524,8 @@ void efa_rdm_pke_handle_rma_read_completion(struct efa_rdm_pke *context_pkt_entr
 				efa_rdm_pke_handle_data_copied(data_pkt_entry);
 			} else {
 				assert(txe && txe->cq_entry.flags & FI_READ);
-				efa_rdm_txe_report_completion(txe);
+				if (!(txe->internal_flags & EFA_RDM_TXE_NO_COMPLETION))
+					efa_rdm_txe_report_completion(txe);
 			}
 
 			efa_rdm_txe_release(txe);
@@ -593,10 +593,12 @@ void efa_rdm_pke_handle_rma_completion(struct efa_rdm_pke *context_pkt_entry)
 		txe = context_pkt_entry->ope;
 		txe->bytes_write_completed += rma_context_pkt->seg_size;
 		if (txe->bytes_write_completed == txe->bytes_write_total_len) {
-			if (txe->fi_flags & FI_COMPLETION)
-				efa_rdm_txe_report_completion(txe);
-			else
-				efa_cntr_report_tx_completion(&context_pkt_entry->ep->base_ep.util_ep, txe->cq_entry.flags);
+			if (!(txe->internal_flags & EFA_RDM_TXE_NO_COMPLETION)) {
+				if (txe->fi_flags & FI_COMPLETION)
+					efa_rdm_txe_report_completion(txe);
+				else
+					efa_cntr_report_tx_completion(&context_pkt_entry->ep->base_ep.util_ep, txe->cq_entry.flags);
+			}
 			efa_rdm_txe_release(txe);
 		}
 		break;
@@ -783,7 +785,21 @@ void efa_rdm_pke_handle_receipt_recv(struct efa_rdm_pke *pkt_entry)
 		return;
 	}
 
-	efa_rdm_ope_handle_send_completed(txe);
+	/* Write send completion immediately to preserve DC semantics */
+	efa_rdm_txe_report_completion(txe);
+
+	/* Remove from ope_longcts_send_list since operation is complete */
+	if (txe->state == EFA_RDM_OPE_SEND) {
+		dlist_remove(&txe->entry);
+	}
+
+	/* Set receipt received flag for DC operations */
+	txe->internal_flags |= EFA_RDM_TXE_RECEIPT_RECEIVED;
+
+	/* Only release txe if both conditions are met */
+	if (efa_rdm_txe_dc_ready_for_release(txe))
+		efa_rdm_txe_release(txe);
+
 	efa_rdm_pke_release_rx(pkt_entry);
 }
 

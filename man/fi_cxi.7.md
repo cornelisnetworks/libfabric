@@ -1130,6 +1130,11 @@ The CXI provider checks for the following environment variables:
     message should be retried. A value of 0 will return an error completion
     on the first RNR ack status.
 
+*FI_CXI_RNR_APPEND_RETRY_TIMEOUT_US*
+:   When using the endpoint FI_PROTO_CXI_RNR protocol, this setting is used to
+    control the maximum time to retry appending a recv buffer to the LE. It
+    defaults to 200ms and if set to 0, will disable the retry mechanism.
+
 *FI_CXI_EQ_ACK_BATCH_SIZE*
 :   Number of EQ events to process before writing an acknowledgement to HW.
     Batching ACKs amortizes the cost of event acknowledgement over multiple
@@ -1229,7 +1234,8 @@ The CXI provider checks for the following environment variables:
     Default receive event queue size is based on FI_UNIVERSE_SIZE. Increasing the
     receive event queue size can help prevent side-band/control messages from
     being dropped and retried but at the cost of additional memory usage. Size is
-    always aligned up to a 4KiB boundary.
+    always aligned up to a 4KiB boundary and a size of 0 will force it back
+    to the default max size of 64MB.
 
 *FI_CXI_DEFAULT_CQ_SIZE*
 :   Change the provider default completion queue size expressed in entries. This
@@ -1313,6 +1319,26 @@ The CXI provider checks for the following environment variables:
 *FI_CXI_ENABLE_TRIG_OP_LIMIT*
 :   Enable enforcement of triggered operation limit. Doing this can prevent
     fi_control(FI_QUEUE_WORK) deadlocking at the cost of performance.
+
+*FI_CXI_ENABLE_WRITEDATA*
+:   Controls provider support for the fi_writedata() and fi_inject_writedata() RMA
+    operations. When enabled and the domain attribute cq_data_size is non-zero,
+    the CXI provider implements handling to generate solicited RMA completions that
+    include immediate data; completions will include FI_REMOTE_CQ_DATA and will
+    report source information when FI_SOURCE is enabled (FI_SOURCE_ERR behavior is
+    followed on resolution failures).
+
+    Note that the CXI_RX_CQ_DATA capability is not required and writedata RMA
+    operations do not consume posted receive buffers on the target. The feature
+    is gated by domain/endpoint capabilities (for example, a non-zero
+    domain_attr->cq_data_size in the libfabric API) and endpoint support. Internally,
+    the combination of domain and endpoint cq_data_size sets rma_cq_data_size. Only
+    provider MR keys are supported.
+
+    This option is disabled by default; enable it only when applications require
+    immediate-data delivery on RMA completions or for controlled testing and
+    debugging. Application support for FI_MR_PROV_KEY mr_mode is required to use
+    this feature.
 
 *FI_CXI_MR_CACHE_EVENTS_DISABLE_POLL_NSECS*
 :   Max amount of time to poll when disabling an MR configured with MR match events.

@@ -14,7 +14,6 @@ struct efa_env efa_env = {
 	.tx_queue_size = 0,
 	.enable_shm_transfer = 1,
 	.use_zcpy_rx = 1,
-	.zcpy_rx_seed = 0,
 	.shm_av_size = 256,
 	.recvwin_size = EFA_RDM_PEER_DEFAULT_REORDER_BUFFER_SIZE,
 	.ooo_pool_chunk_size = 64,
@@ -41,7 +40,30 @@ struct efa_env efa_env = {
 	.internal_rx_refill_threshold = 8,
 	.use_data_path_direct = true,
 	.implicit_av_size = 0,
+	.track_mr = 0,
+	.use_hw_cntr = 0,
+	.enable_high_pps = 0,
 };
+
+/**
+ * @brief Read environment variables that are not registered via fi_param_define
+ *
+ * These are for features under development so we can control
+ * when to enable them without exposing them to applications.
+ */
+static void efa_env_unregistered_param_get(void)
+{
+	char *tmp;
+
+	tmp = getenv("FI_EFA_USE_HW_CNTR");
+	if (tmp)
+		efa_env.use_hw_cntr = atoi(tmp);
+
+	/* Read enable_high_pps directly from environment variable to avoid showing in fi_info -e */
+	tmp = getenv("FI_EFA_ENABLE_HIGH_PPS");
+	if (tmp)
+		efa_env.enable_high_pps = atoi(tmp);
+}
 
 /* @brief Read and store the FI_EFA_* environment variables.
  */
@@ -55,7 +77,7 @@ void efa_env_param_get(void)
 	 */
 	size_t max_rnr_backoff_wait_time_cap = INT_MAX/2 - 1;
 	char *abort_deprecated_env_vars[] = {"FI_EFA_MTU_SIZE", "FI_EFA_TX_IOV_LIMIT", "FI_EFA_RX_IOV_LIMIT"};
-	char *info_deprecated_env_vars[] = {"FI_EFA_SET_CUDA_SYNC_MEMOPS", "FI_EFA_SHM_MAX_MEDIUM_SIZE"};
+	char *info_deprecated_env_vars[] = {"FI_EFA_SET_CUDA_SYNC_MEMOPS", "FI_EFA_SHM_MAX_MEDIUM_SIZE", "FI_EFA_ZCPY_RX_SEED"};
 	int i;
 
 	for (i = 0; i < sizeof(abort_deprecated_env_vars) / sizeof(abort_deprecated_env_vars[0]); i++) {
@@ -96,7 +118,6 @@ void efa_env_param_get(void)
 	fi_param_get_int(&efa_prov, "tx_queue_size", &efa_env.tx_queue_size);
 	fi_param_get_int(&efa_prov, "enable_shm_transfer", &efa_env.enable_shm_transfer);
 	fi_param_get_int(&efa_prov, "use_zcpy_rx", &efa_env.use_zcpy_rx);
-	fi_param_get_int(&efa_prov, "zcpy_rx_seed", &efa_env.zcpy_rx_seed);
 	fi_param_get_int(&efa_prov, "shm_av_size", &efa_env.shm_av_size);
 	fi_param_get_int(&efa_prov, "recvwin_size", &efa_env.recvwin_size);
 	fi_param_get_int(&efa_prov, "readcopy_pool_size", &efa_env.readcopy_pool_size);
@@ -140,8 +161,10 @@ void efa_env_param_get(void)
 		efa_env.huge_page_setting = use_huge_page ? EFA_ENV_HUGE_PAGE_ENABLED : EFA_ENV_HUGE_PAGE_DISABLED;
 	}
 	fi_param_get_bool(&efa_prov, "use_data_path_direct", &efa_env.use_data_path_direct);
+	fi_param_get_bool(&efa_prov, "track_mr", &efa_env.track_mr);
 
 	efa_fork_support_request_initialize();
+	efa_env_unregistered_param_get();
 }
 
 void efa_env_define()
@@ -160,8 +183,6 @@ void efa_env_define()
 			"Enable using SHM provider to perform TX/RX operations between processes on the same system. (Default: 1)");
 	fi_param_define(&efa_prov, "use_zcpy_rx", FI_PARAM_INT,
 			"Enables the use of application's receive buffers in place of bounce-buffers when feasible. (Default: 1)");
-	fi_param_define(&efa_prov, "zcpy_rx_seed", FI_PARAM_INT,
-			"Defines the number of bounce-buffers the provider will prepost during EP initialization.  (Default: 0)");
 	fi_param_define(&efa_prov, "shm_av_size", FI_PARAM_INT,
 			"Defines the maximum number of entries in SHM provider's address vector (Default 128).");
 	fi_param_define(&efa_prov, "recvwin_size", FI_PARAM_INT,
@@ -233,6 +254,11 @@ void efa_env_define()
 			"size. Setting this value to 0 will allow unbounded "
 			"growth of the implicit AV. (Default: 0)",
 			efa_env.implicit_av_size);
+	fi_param_define(&efa_prov, "track_mr", FI_PARAM_BOOL,
+			"Enable tracking of memory registrations to detect if "
+			"any outstanding operations still reference an MR when "
+			"it is closed. This is useful for debugging memory "
+			"registration issues. (Default: false)");
 }
 
 

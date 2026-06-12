@@ -109,29 +109,16 @@ int ofi_genlock_init(struct ofi_genlock *lock,
 	switch (lock->lock_type) {
 	case OFI_LOCK_SPINLOCK:
 		ret = ofi_spin_init(&lock->base.spinlock);
-		lock->lock = (ofi_genlock_lockop_t) ofi_spin_lock_op;
-		lock->unlock = (ofi_genlock_lockop_t) ofi_spin_unlock_op;
-		lock->held = (ofi_genlock_lockheld_t) ofi_spin_held_op;
 		break;
 	case OFI_LOCK_MUTEX:
 		ret = ofi_mutex_init(&lock->base.mutex);
-		lock->lock = (ofi_genlock_lockop_t) ofi_mutex_lock_op;
-		lock->unlock = (ofi_genlock_lockop_t) ofi_mutex_unlock_op;
-		lock->held = (ofi_genlock_lockheld_t) ofi_mutex_held_op;
 		break;
 	case OFI_LOCK_NOOP:
 		/* Use mutex for debug no-op support */
 		ret = ofi_mutex_init(&lock->base.mutex);
-		lock->lock = (ofi_genlock_lockop_t) ofi_mutex_lock_noop;
-		lock->unlock = (ofi_genlock_lockop_t) ofi_mutex_unlock_noop;
-		lock->held = (ofi_genlock_lockheld_t) ofi_mutex_held_op;
 		break;
 	case OFI_LOCK_NONE:
 		ret = 0;
-		lock->base.nolock = NULL;
-		lock->lock = (ofi_genlock_lockop_t) ofi_nolock_lock_op;
-		lock->unlock = (ofi_genlock_lockop_t) ofi_nolock_unlock_op;
-		lock->held = (ofi_genlock_lockheld_t) ofi_nolock_held_op;
 		break;
 	default:
 		ret = -FI_EINVAL;
@@ -470,7 +457,7 @@ sa_ib:
 			     *((uint64_t *)addr + 2), *((uint64_t *)addr + 3));
 		break;
 	case FI_ADDR_OPX:
-		size = snprintf(buf, *len, "fi_addr_opx://%016lx", *(uint64_t *)addr);
+		size = snprintf(buf, *len, "fi_addr_opx://%016" PRIx64, *(uint64_t *)addr);
 		break;
 	case FI_ADDR_MLX:
 		size = snprintf(buf, *len, "fi_addr_mlx://%p", addr);
@@ -1471,7 +1458,13 @@ int ofi_bsock_async_done(const struct fi_provider *prov,
 		return -errno;
 	}
 
-	assert(!(msg.msg_flags & MSG_CTRUNC));
+	if (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) {
+		FI_WARN(prov, FI_LOG_EP_DATA,
+			"Truncated message on MSG_ERRQUEUE (flags: 0x%x, ctrl len: %zu, received len: %zu)\n",
+			msg.msg_flags, sizeof(ctrl), msg.msg_controllen);
+		return -FI_EINVAL;
+	}
+
 	cmsg = CMSG_FIRSTHDR(&msg);
 	if ((cmsg->cmsg_level != SOL_IP && cmsg->cmsg_type != IP_RECVERR) &&
 	    (cmsg->cmsg_level != SOL_IPV6 && cmsg->cmsg_type != IPV6_RECVERR)) {

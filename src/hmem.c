@@ -100,7 +100,7 @@ static int ofi_hmem_no_dev_reg_copy_from_hmem(uint64_t handle, void *dest,
 static int ofi_hmem_system_dev_register(const void *addr, size_t size,
 					uint64_t *handle)
 {
-	*handle = (uint64_t) addr;
+	*handle = (uint64_t)(uintptr_t) addr;
 	return FI_SUCCESS;
 }
 
@@ -419,9 +419,9 @@ static ssize_t ofi_dev_reg_copy_hmem_iov_buf(enum fi_hmem_iface hmem_iface, uint
 	return done;
 }
 
-static ssize_t ofi_copy_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
-		size_t iov_count, size_t offset, void *buf,
-		size_t size, int dir)
+ssize_t ofi_copy_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
+			size_t iov_count, size_t offset, void *buf,
+			size_t size, int dir)
 {
 	uint64_t done = 0, len;
 	uint64_t hmem_iface, hmem_device, hmem_flags;
@@ -450,11 +450,11 @@ static ssize_t ofi_copy_mr_iov(struct ofi_mr **mr, const struct iovec *iov,
 		if (hmem_flags & OFI_HMEM_DATA_DEV_REG_HANDLE) {
 			if (dir == OFI_COPY_BUF_TO_IOV)
 				ofi_hmem_dev_reg_copy_to_hmem(
-					hmem_iface, (uint64_t) hmem_data,
+					hmem_iface, (uint64_t)(uintptr_t) hmem_data,
 					hmem_buf, (char *) buf + done, len);
 			else
 				ofi_hmem_dev_reg_copy_from_hmem(
-					hmem_iface, (uint64_t) hmem_data,
+					hmem_iface, (uint64_t)(uintptr_t) hmem_data,
 					(char *) buf + done, hmem_buf, len);
 			ret = FI_SUCCESS;
 		} else if (dir == OFI_COPY_BUF_TO_IOV)

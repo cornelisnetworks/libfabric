@@ -201,7 +201,8 @@ The verbs provider checks for the following environment variables.
 : The GID index to use (default: 0)
 
 *FI_VERBS_DEVICE_NAME*
-: Specify a specific verbs device to use by name
+: A comma separated list of prefixes or full names of verbs devices to use.
+  (default: none)
 
 *FI_VERBS_USE_DMABUF*
 : If supported, try to use ibv_reg_dmabuf_mr first to register dmabuf-based
@@ -209,11 +210,20 @@ The verbs provider checks for the following environment variables.
   testing the functionality of the dmabuf_peer_mem hooking provider and the
   corresponding kernel driver. (default: yes)
 
+*FI_VERBS_NIC_AFFINITY_POLICY*
+: NIC affinity policy for ordering NICs in fi_getinfo results. (default: none)
+
+*FI_VERBS_AFFINITY_DEVICE*
+: PCI address of device for NIC affinity.
+
+*FI_VERBS_NIC_AFFINITY_CONFIG*
+: Path to NIC affinity configuration file for 'manual' policy.
+
 ### Variables specific to MSG endpoints
 
 *FI_VERBS_IFACE*
-: The prefix or the full name of the network interface associated with the verbs
-  device (default: ib)
+: A comma separated list of prefixes or full names of network interfaces
+  associated with the verbs devices to use (default: none)
 
 ### Variables specific to DGRAM endpoints
 

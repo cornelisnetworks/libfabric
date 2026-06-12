@@ -78,6 +78,7 @@ struct ft_context *tx_ctx_arr = NULL, *rx_ctx_arr = NULL;
 uint64_t remote_cq_data = 0;
 
 uint64_t tx_seq, rx_seq, tx_cq_cntr, rx_cq_cntr;
+uint32_t ft_fiversion = FT_FIVERSION;
 int (*ft_mr_alloc_func)(void);
 uint64_t ft_tag = 0;
 int ft_parent_proc = 0;
@@ -434,7 +435,7 @@ int ft_get_dmabuf_from_iov(struct fi_mr_dmabuf *dmabuf,
 		dmabuf[i].fd = dmabuf_fd;
 		dmabuf[i].offset = dmabuf_offset;
 		dmabuf[i].len = iov[i].iov_len;
-		dmabuf[i].base_addr = (void *)(
+		dmabuf[i].base_addr = (void *)(uintptr_t)(
 			(uintptr_t) iov[i].iov_base - dmabuf_offset);
 	}
 	return FI_SUCCESS;
@@ -469,7 +470,7 @@ int ft_reg_mr(struct fi_info *fi, void *buf, size_t size, uint64_t access,
 		dmabuf.fd = dmabuf_fd;
 		dmabuf.offset = dmabuf_offset;
 		dmabuf.len = size;
-		dmabuf.base_addr = (void *)((uintptr_t) buf - dmabuf_offset);
+		dmabuf.base_addr = (void *)((char *) buf - dmabuf_offset);
 		flags |= FI_MR_DMABUF;
 	}
 
@@ -550,30 +551,41 @@ static void ft_set_tx_rx_sizes(size_t *set_tx, size_t *set_rx)
 	*set_tx += ft_tx_prefix_size();
 }
 
-void ft_free_host_bufs(void)
+int ft_free_host_bufs(void)
 {
-	int ret;
+	int ret, first_err = 0;
 
 	if (dev_host_buf) {
 		ret = ft_hmem_free_host(opts.iface, dev_host_buf);
-		if (ret)
+		if (ret) {
 			FT_PRINTERR("ft_hmem_free_host", ret);
+			if (!first_err)
+				first_err = ret;
+		}
 		dev_host_buf = NULL;
 	}
 
 	if (dev_host_res) {
 		ret = ft_hmem_free_host(opts.iface, dev_host_res);
-		if (ret)
+		if (ret) {
 			FT_PRINTERR("ft_hmem_free_host", ret);
+			if (!first_err)
+				first_err = ret;
+		}
 		dev_host_res = NULL;
 	}
 
 	if (dev_host_comp) {
 		ret = ft_hmem_free_host(opts.iface, dev_host_comp);
-		if (ret)
+		if (ret) {
 			FT_PRINTERR("ft_hmem_free_host", ret);
+			if (!first_err)
+				first_err = ret;
+		}
 		dev_host_comp = NULL;
 	}
+
+	return first_err;
 }
 
 /*
@@ -1068,13 +1080,23 @@ int ft_getinfo(struct fi_info *hints, struct fi_info **info)
 		hints->domain_attr->mr_mode |= FI_MR_HMEM;
 	}
 
+	/**
+	 * Provider may not satisfy the requested max message size.
+	 * Make hints request such max size to allow early
+	 * checking in fi_getinfo.
+	 */
+	if (opts.options & FT_OPT_SIZE)
+		hints->ep_attr->max_msg_size = opts.transfer_size;
+	else if (opts.sizes_enabled == FT_ENABLE_SIZES && test_size != def_test_sizes)
+		hints->ep_attr->max_msg_size = test_size[TEST_CNT-1].size;
+
 	/* ft_cqdata_opcodes enum start from 1, 0 means no cq data */
 	if (opts.cqdata_op && allow_rx_cq_data)
 		hints->mode |= FI_RX_CQ_DATA;
 
 	hints->domain_attr->threading = opts.threading;
 
-	ret = fi_getinfo(FT_FIVERSION, node, service, flags, hints, info);
+	ret = fi_getinfo(ft_fiversion, node, service, flags, hints, info);
 	if (ret) {
 		FT_PRINTERR("fi_getinfo", ret);
 		return ret;
@@ -1868,52 +1890,67 @@ int ft_exchange_keys(struct fi_rma_iov *peer_iov)
 	return ft_sync();
 }
 
-static void ft_cleanup_mr_array(struct ft_context *ctx_arr, char **mr_bufs)
+static int ft_cleanup_mr_array(struct ft_context *ctx_arr, char **mr_bufs)
 {
-	int i, ret;
+	int i, ret, first_err = 0;
 
 	if (!mr_bufs)
-		return;
+		return 0;
 
 	for (i = 0; i < opts.window_size; i++) {
-		FT_CLOSE_FID(ctx_arr[i].mr);
+		FT_CLOSE_FID_RET(ctx_arr[i].mr, ret);
+		if (ret && !first_err)
+			first_err = ret;
 		ret = ft_hmem_free(opts.iface, mr_bufs[i]);
-		if (ret)
+		if (ret) {
 			FT_PRINTERR("ft_hmem_free", ret);
+			if (!first_err)
+				first_err = ret;
+		}
 	}
+	return first_err;
 }
 
-void ft_close_fids(void)
+int ft_close_fids(void)
 {
-	FT_CLOSE_FID(mc);
-	FT_CLOSE_FID(alias_ep);
+	int ret, first_err = 0;
+
+#define FT_TRACK_CLOSE(fd) \
+	do { FT_CLOSE_FID_RET(fd, ret); if (ret && !first_err) first_err = ret; } while (0)
+
+	FT_TRACK_CLOSE(mc);
+	FT_TRACK_CLOSE(alias_ep);
 	if (fi && fi->domain_attr->mr_mode & FI_MR_ENDPOINT) {
 		if (mr != &no_mr) {
-			FT_CLOSE_FID(mr);
+			FT_TRACK_CLOSE(mr);
 			mr = &no_mr;
 		}
 	}
-	FT_CLOSE_FID(ep);
-	FT_CLOSE_FID(pep);
+	FT_TRACK_CLOSE(ep);
+	FT_TRACK_CLOSE(pep);
 	if (opts.options & FT_OPT_CQ_SHARED) {
-		FT_CLOSE_FID(txcq);
+		FT_TRACK_CLOSE(txcq);
 	} else {
-		FT_CLOSE_FID(rxcq);
-		FT_CLOSE_FID(txcq);
+		FT_TRACK_CLOSE(rxcq);
+		FT_TRACK_CLOSE(txcq);
 	}
-	FT_CLOSE_FID(rxcntr);
-	FT_CLOSE_FID(txcntr);
-	FT_CLOSE_FID(rma_cntr);
-	FT_CLOSE_FID(pollset);
+	FT_TRACK_CLOSE(rxcntr);
+	FT_TRACK_CLOSE(txcntr);
+	FT_TRACK_CLOSE(rma_cntr);
+	FT_TRACK_CLOSE(pollset);
 	if (mr != &no_mr)
-		FT_CLOSE_FID(mr);
-	FT_CLOSE_FID(av);
-	FT_CLOSE_FID(srx);
-	FT_CLOSE_FID(stx);
-	FT_CLOSE_FID(domain);
-	FT_CLOSE_FID(eq);
-	FT_CLOSE_FID(waitset);
-	FT_CLOSE_FID(fabric);
+		FT_TRACK_CLOSE(mr);
+	FT_TRACK_CLOSE(av);
+	FT_TRACK_CLOSE(srx);
+	FT_TRACK_CLOSE(stx);
+	FT_TRACK_CLOSE(domain);
+	FT_TRACK_CLOSE(eq);
+	FT_TRACK_CLOSE(waitset);
+	FT_TRACK_CLOSE(fabric);
+
+#undef FT_TRACK_CLOSE
+
+	return first_err;
 }
 
 /* We need to free any data that we allocated before freeing the
@@ -1951,28 +1988,39 @@ void ft_freehints(struct fi_info *hints)
 	fi_freeinfo(hints);
 }
 
-void ft_free_res(void)
+int ft_free_res(void)
 {
-	int ret;
+	int ret, first_err = 0;
 
-	ft_cleanup_mr_array(tx_ctx_arr, tx_mr_bufs);
-	ft_cleanup_mr_array(rx_ctx_arr, rx_mr_bufs);
+	ret = ft_cleanup_mr_array(tx_ctx_arr, tx_mr_bufs);
+	if (ret && !first_err)
+		first_err = ret;
+	ret = ft_cleanup_mr_array(rx_ctx_arr, rx_mr_bufs);
+	if (ret && !first_err)
+		first_err = ret;
 
 	free(tx_ctx_arr);
 	free(rx_ctx_arr);
 	tx_ctx_arr = NULL;
 	rx_ctx_arr = NULL;
 
-	ft_close_fids();
+	ret = ft_close_fids();
+	if (ret && !first_err)
+		first_err = ret;
 	free(user_test_sizes);
 	if (buf) {
 		ret = ft_hmem_free(opts.iface, buf);
-		if (ret)
+		if (ret) {
 			FT_PRINTERR("ft_hmem_free", ret);
+			if (!first_err)
+				first_err = ret;
+		}
 		buf = rx_buf = tx_buf = NULL;
 		buf_size = rx_size = tx_size = tx_mr_size = rx_mr_size = 0;
 	}
-	ft_free_host_bufs();
+	ret = ft_free_host_bufs();
+	if (ret && !first_err)
+		first_err = ret;
 
 	if (fi_pep) {
 		fi_freeinfo(fi_pep);
@@ -1988,8 +2036,13 @@ void ft_free_res(void)
 	}
 
 	ret = ft_hmem_cleanup(opts.iface);
-	if (ret)
+	if (ret) {
 		FT_PRINTERR("ft_hmem_cleanup", ret);
+		if (!first_err)
+			first_err = ret;
+	}
+
+	return first_err;
 }
 
 static int dupaddr(void **dst_addr, size_t *dst_addrlen,
@@ -2022,7 +2075,7 @@ static int getaddr(char *node, char *service,
 		return 0;
 	}
 
-	ret = fi_getinfo(FT_FIVERSION, node, service, flags, hints, &fi);
+	ret = fi_getinfo(ft_fiversion, node, service, flags, hints, &fi);
 	if (ret) {
 		FT_PRINTERR("fi_getinfo", ret);
 		return ret;
@@ -2715,6 +2768,12 @@ static int ft_spin_for_comp(struct fid_cq *cq, uint64_t *cur,
 	if (timeout >= 0)
 		clock_gettime(CLOCK_MONOTONIC, &a);
 
+	/*
+	 * Callers must ensure *cur < total; calling with *cur >= total
+	 * is a bug because the do...while loop always executes at least
+	 * once and can increment *cur causing an underflow in the
+	 * loop condition.
+	 */
 	do {
 		ret = fi_cq_read(cq, &comp, 1);
 		if (ret > 0) {

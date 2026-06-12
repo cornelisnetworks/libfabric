@@ -45,9 +45,10 @@ int32_t efa_rdm_ep_get_peer_ahn(struct efa_rdm_ep *ep, fi_addr_t addr)
 	return efa_conn ? efa_conn->ah->ahn : -1;
 }
 
+
 /**
  * @brief get pointer to efa_rdm_peer structure for a given libfabric address in
- * the explicit AV
+ * the explicit AV, this function is a thread-safe version of efa_rdm_ep_get_peer_explicit
  *
  * @param[in]		ep		endpoint
  * @param[in]		addr 		libfabric address
@@ -55,9 +56,29 @@ int32_t efa_rdm_ep_get_peer_ahn(struct efa_rdm_ep *ep, fi_addr_t addr)
  */
 struct efa_rdm_peer *efa_rdm_ep_get_peer(struct efa_rdm_ep *ep, fi_addr_t addr)
 {
+	struct efa_rdm_peer *peer;
+	ofi_genlock_lock(&ep->base_ep.domain->srx_lock);
+	peer = efa_rdm_ep_get_peer_explicit(ep, addr);
+	ofi_genlock_unlock(&ep->base_ep.domain->srx_lock);
+	return peer;
+}
+
+
+/**
+ * @brief get pointer to efa_rdm_peer structure for a given libfabric address in
+ * the explicit AV, this function must be called inside an SRX lock
+ *
+ * @param[in]		ep		endpoint
+ * @param[in]		addr 		libfabric address
+ * @returns pointer to #efa_rdm_peer
+ */
+struct efa_rdm_peer *efa_rdm_ep_get_peer_explicit(struct efa_rdm_ep *ep, fi_addr_t addr)
+{
 	struct efa_conn *conn;
 	struct efa_conn_ep_peer_map_entry *map_entry;
 	struct efa_rdm_peer *peer;
+
+	assert(ofi_genlock_held(&ep->base_ep.domain->srx_lock));
 
 	conn = efa_av_addr_to_conn(ep->base_ep.av, addr);
 
@@ -79,7 +100,10 @@ struct efa_rdm_peer *efa_rdm_ep_get_peer(struct efa_rdm_ep *ep, fi_addr_t addr)
 	memset(map_entry, 0, sizeof(*map_entry));
 	map_entry->ep_ptr = ep;
 
-	efa_rdm_peer_construct(&map_entry->peer, ep, conn);
+	if (efa_rdm_peer_construct(&map_entry->peer, ep, conn)) {
+		ofi_buf_free(map_entry);
+		return NULL;
+	}
 
 	efa_conn_ep_peer_map_insert(conn, map_entry);
 
@@ -124,7 +148,10 @@ struct efa_rdm_peer *efa_rdm_ep_get_peer_implicit(struct efa_rdm_ep *ep, fi_addr
 	memset(map_entry, 0, sizeof(*map_entry));
 	map_entry->ep_ptr = ep;
 
-	efa_rdm_peer_construct(&map_entry->peer, ep, conn);
+	if (efa_rdm_peer_construct(&map_entry->peer, ep, conn)) {
+		ofi_buf_free(map_entry);
+		return NULL;
+	}
 	peer = &map_entry->peer;
 
 	efa_conn_ep_peer_map_insert(conn, map_entry);
@@ -158,7 +185,9 @@ struct efa_rdm_ope *efa_rdm_ep_alloc_rxe(struct efa_rdm_ep *ep, struct efa_rdm_p
 	}
 
 	rxe->ep = ep;
+	efa_domain_ope_list_lock(efa_rdm_ep_domain(ep));
 	dlist_insert_tail(&rxe->ep_entry, &ep->rxe_list);
+	efa_domain_ope_list_unlock(efa_rdm_ep_domain(ep));
 	rxe->type = EFA_RDM_RXE;
 	rxe->internal_flags = 0;
 	rxe->fi_flags = 0;
@@ -228,101 +257,6 @@ struct efa_rdm_ope *efa_rdm_ep_alloc_rxe(struct efa_rdm_ep *ep, struct efa_rdm_p
 }
 
 /**
- * @brief post user provided receiving buffer to the device.
- *
- * The user receive buffer was converted to an RX packet, then posted to the device.
- *
- * @param[in]	ep		endpint
- * @param[in]	rxe	rxe that contain user buffer information
- * @param[in]	flags		user supplied flags passed to fi_recv
- */
-int efa_rdm_ep_post_user_recv_buf(struct efa_rdm_ep *ep, struct efa_rdm_ope *rxe, uint64_t flags)
-{
-	struct efa_rdm_pke *pkt_entry = NULL;
-	size_t rx_iov_offset = 0;
-	int err, rx_iov_index = 0;
-
-	assert(rxe->iov_count > 0  && rxe->iov_count <= ep->base_ep.info->rx_attr->iov_limit);
-	assert(rxe->iov[0].iov_len >= ep->msg_prefix_size);
-	pkt_entry = efa_rdm_pke_alloc(ep, ep->user_rx_pkt_pool, EFA_RDM_PKE_FROM_USER_RX_POOL);
-	if (OFI_UNLIKELY(!pkt_entry))
-		return -FI_EAGAIN;
-
-	pkt_entry->ope = rxe;
-	pkt_entry->peer = rxe->peer;
-	rxe->state = EFA_RDM_RXE_MATCHED;
-
-	err = ofi_iov_locate(rxe->iov, rxe->iov_count, ep->msg_prefix_size, &rx_iov_index, &rx_iov_offset);
-	if (OFI_UNLIKELY(err)) {
-		EFA_WARN(FI_LOG_CQ, "ofi_iov_locate failure: %s (%d)\n", fi_strerror(-err), -err);
-		goto err_free;
-	}
-
-	assert(rx_iov_index < rxe->iov_count);
-	assert(rx_iov_offset < rxe->iov[rx_iov_index].iov_len);
-	assert(ep->base_ep.domain->mr_local);
-
-	if (!rxe->desc[rx_iov_index]) {
-		err = -FI_EINVAL;
-		EFA_WARN(FI_LOG_EP_CTRL,
-			 "No valid desc is provided, not complied with FI_MR_LOCAL: %s (%d)\n",
-			 fi_strerror(-err), -err);
-		goto err_free;
-	}
-
-	pkt_entry->payload = (char *) rxe->iov[rx_iov_index].iov_base + rx_iov_offset;
-	pkt_entry->payload_mr = rxe->desc[rx_iov_index];
-	pkt_entry->payload_size = ofi_total_iov_len(&rxe->iov[rx_iov_index], rxe->iov_count - rx_iov_index) - rx_iov_offset;
-
-	err = efa_rdm_pke_user_recvv(&pkt_entry, 1, flags);
-	if (OFI_UNLIKELY(err)) {
-		EFA_WARN(FI_LOG_EP_CTRL,
-			"failed to post user supplied buffer %d (%s)\n", -err,
-			fi_strerror(-err));
-		goto err_free;
-	}
-
-#if ENABLE_DEBUG
-	dlist_insert_tail(&pkt_entry->dbg_entry, &ep->rx_posted_buf_list);
-#endif
-	ep->user_rx_pkts_posted++;
-	return 0;
-
-err_free:
-	if (pkt_entry)
-		efa_rdm_pke_release_rx(pkt_entry);
-	return err;
-}
-
-
-
-/* create a new txe */
-struct efa_rdm_ope *efa_rdm_ep_alloc_txe(struct efa_rdm_ep *efa_rdm_ep,
-					 struct efa_rdm_peer *peer,
-					 const struct fi_msg *msg,
-					 uint32_t op,
-					 uint64_t tag,
-					 uint64_t flags)
-{
-	struct efa_rdm_ope *txe;
-
-	txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
-	if (OFI_UNLIKELY(!txe)) {
-		EFA_DBG(FI_LOG_EP_CTRL, "TX entries exhausted.\n");
-		return NULL;
-	}
-
-	efa_rdm_txe_construct(txe, efa_rdm_ep, peer, msg, op, flags);
-	if (op == ofi_op_tagged) {
-		txe->cq_entry.tag = tag;
-		txe->tag = tag;
-	}
-
-	dlist_insert_tail(&txe->ep_entry, &efa_rdm_ep->txe_list);
-	return txe;
-}
-
-/**
  * @brief record the event that a TX op has been submitted
  *
  * This function is called after a TX operation has been posted
@@ -381,6 +315,24 @@ void efa_rdm_ep_record_tx_op_submitted(struct efa_rdm_ep *ep, struct efa_rdm_pke
 	}
 #if ENABLE_DEBUG
 	ep->efa_total_posted_tx_ops++;
+	/* Record post event based on operation type */
+	int event_type;
+	switch (ope->op) {
+	case ofi_op_read_req:
+		event_type = EFA_RDM_PKE_DEBUG_EVENT_READ_POST;
+		break;
+	case ofi_op_write:
+		event_type = EFA_RDM_PKE_DEBUG_EVENT_WRITE_POST;
+		break;
+	default:
+		event_type = EFA_RDM_PKE_DEBUG_EVENT_SEND_POST;
+		break;
+	}
+	efa_rdm_pke_record_debug_info(pkt_entry,
+	                               ep->base_ep.qp->qp_num,
+	                               ep->base_ep.qp->qkey,
+	                               pkt_entry->gen,
+	                               event_type);
 #endif
 }
 
@@ -420,6 +372,31 @@ void efa_rdm_ep_record_tx_op_submitted(struct efa_rdm_ep *ep, struct efa_rdm_pke
 void efa_rdm_ep_record_tx_op_completed(struct efa_rdm_ep *ep, struct efa_rdm_pke *pkt_entry)
 {
 	struct efa_rdm_ope *ope = NULL;
+
+#if ENABLE_DEBUG
+	/*
+	 * Record completion event based on operation type.
+	 * Note: qp_num is truncated to 10 bits, gen to 6 bits.
+	 */
+	int event_type = EFA_RDM_PKE_DEBUG_EVENT_SEND_COMPLETION;
+	if (pkt_entry->ope) {
+		switch (pkt_entry->ope->op) {
+		case ofi_op_read_req:
+			event_type = EFA_RDM_PKE_DEBUG_EVENT_READ_COMPLETION;
+			break;
+		case ofi_op_write:
+			event_type = EFA_RDM_PKE_DEBUG_EVENT_WRITE_COMPLETION;
+			break;
+		default:
+			break;
+		}
+	}
+	efa_rdm_pke_record_debug_info(pkt_entry,
+	                               ep->base_ep.qp->qp_num,
+	                               ep->base_ep.qp->qkey,
+	                               pkt_entry->gen,
+	                               event_type);
+#endif
 
 	ope = pkt_entry->ope;
 	/*
@@ -606,18 +583,20 @@ static ssize_t efa_rdm_ep_handshake_common(struct efa_rdm_ep *ep, struct efa_rdm
 
 	msg.addr = peer->conn->fi_addr;
 
-	txe = efa_rdm_ep_alloc_txe(ep, peer, &msg, ofi_op_write, 0, 0);
-
+	txe = ofi_buf_alloc(ep->ope_pool);
 	if (OFI_UNLIKELY(!txe)) {
 		EFA_WARN(FI_LOG_EP_CTRL, "TX entries exhausted.\n");
 		return -FI_EAGAIN;
 	}
 
-	/* efa_rdm_ep_alloc_txe() joins ep->base_ep.util_ep.tx_op_flags and passed in flags,
-	 * reset to desired flags (remove things like FI_DELIVERY_COMPLETE, and FI_COMPLETION)
+	efa_rdm_txe_construct(txe, ep, peer, &msg, ofi_op_write, 0,
+			      EFA_RDM_OPE_INTERNAL | EFA_RDM_TXE_NO_COMPLETION | EFA_RDM_TXE_NO_COUNTER);
+
+	/* efa_rdm_txe_construct() joins ep->base_ep.util_ep.tx_op_flags with the
+	 * passed-in flags into fi_flags; reset fi_flags to 0 so handshake txe
+	 * carries no libfabric flags (FI_DELIVERY_COMPLETE, FI_COMPLETION, ...).
 	 */
-	txe->fi_flags = EFA_RDM_TXE_NO_COMPLETION | EFA_RDM_TXE_NO_COUNTER;
-	txe->internal_flags |= EFA_RDM_OPE_INTERNAL;
+	txe->fi_flags = 0;
 
 	pkt_entry = efa_rdm_pke_alloc(ep, ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);
 	if (OFI_UNLIKELY(!pkt_entry)) {
@@ -786,6 +765,8 @@ ssize_t efa_rdm_ep_post_queued_pkts(struct efa_rdm_ep *ep,
 				/* add the pkt back to pkts, so it can be resent again */
 				dlist_insert_tail(&pkt_entry->entry, pkts);
 				pkt_entry->flags |= EFA_RDM_PKE_IN_OPE_QUEUED_PKTS;
+			} else {
+				efa_rdm_pke_release_tx(pkt_entry);
 			}
 
 			return ret;
@@ -816,13 +797,13 @@ int efa_rdm_ep_bulk_post_internal_rx_pkts(struct efa_rdm_ep *ep)
 	int i, err;
 
 	/**
-	 * When efa_env.internal_rx_refill_threshold > efa_rdm_ep_get_rx_pool_size(ep),
+	 * When efa_env.internal_rx_refill_threshold > efa_base_ep_get_rx_pool_size(&ep->base_ep),
 	 * we should always refill when the pool is empty.
 	 */
-	if (ep->efa_rx_pkts_to_post < MIN(efa_env.internal_rx_refill_threshold, efa_rdm_ep_get_rx_pool_size(ep)))
+	if (ep->efa_rx_pkts_to_post < MIN(efa_env.internal_rx_refill_threshold, efa_base_ep_get_rx_pool_size(&ep->base_ep)))
 		return 0;
 
-	assert(ep->efa_rx_pkts_to_post + ep->efa_rx_pkts_posted <= ep->efa_max_outstanding_rx_ops);
+	assert(ep->efa_rx_pkts_to_post + ep->efa_rx_pkts_posted <= efa_base_ep_get_rx_pool_size(&ep->base_ep));
 	for (i = 0; i < ep->efa_rx_pkts_to_post; ++i) {
 		ep->pke_vec[i] = efa_rdm_pke_alloc(ep, ep->efa_rx_pkt_pool,
 					       EFA_RDM_PKE_FROM_EFA_RX_POOL);
@@ -984,10 +965,10 @@ void efa_rdm_ep_post_internal_rx_pkts(struct efa_rdm_ep *ep)
 		if (err)
 			goto err_exit;
 
-		ep->efa_rx_pkts_to_post = efa_rdm_ep_get_rx_pool_size(ep);
+		ep->efa_rx_pkts_to_post = efa_base_ep_get_rx_pool_size(&ep->base_ep);
 	}
 
-	assert(ep->efa_rx_pkts_to_post + ep->efa_rx_pkts_posted + ep->efa_rx_pkts_held == efa_rdm_ep_get_rx_pool_size(ep));
+	assert(ep->efa_rx_pkts_to_post + ep->efa_rx_pkts_posted + ep->efa_rx_pkts_held == efa_base_ep_get_rx_pool_size(&ep->base_ep));
 
 	err = efa_rdm_ep_bulk_post_internal_rx_pkts(ep);
 	if (err)
@@ -998,26 +979,6 @@ void efa_rdm_ep_post_internal_rx_pkts(struct efa_rdm_ep *ep)
 err_exit:
 
 	efa_base_ep_write_eq_error(&ep->base_ep, err, FI_EFA_ERR_INTERNAL_RX_BUF_POST);
-}
-
-/**
- * @brief Get memory alignment for given ep and hmem iface
- *
- * @param ep efa rdm ep
- * @param iface hmem iface
- * @return size_t the memory alignment
- */
-size_t efa_rdm_ep_get_memory_alignment(struct efa_rdm_ep *ep, enum fi_hmem_iface iface)
-{
-	size_t memory_alignment = EFA_RDM_DEFAULT_MEMORY_ALIGNMENT;
-
-	if (ep->sendrecv_in_order_aligned_128_bytes) {
-		memory_alignment = EFA_RDM_IN_ORDER_ALIGNMENT;
-	} else if (iface == FI_HMEM_CUDA) {
-		memory_alignment = EFA_RDM_CUDA_MEMORY_ALIGNMENT;
-	}
-
-	return memory_alignment;
 }
 
 /**

@@ -230,6 +230,14 @@ static void efa_rdm_cq_proc_ibv_recv_rdma_with_imm_completion(
 		 */
 		assert(pkt_entry);
 		ep->efa_rx_pkts_posted--;
+#if ENABLE_DEBUG
+		/* Record RECV_RDMA_WITH_IMM event */
+		efa_rdm_pke_record_debug_info(pkt_entry,
+		                               ep->base_ep.qp->qp_num,
+		                               ep->base_ep.qp->qkey,
+		                               pkt_entry->gen,
+		                               EFA_RDM_PKE_DEBUG_EVENT_RECV_RDMA_WITH_IMM);
+#endif
 		efa_rdm_cq_increment_pkt_entry_gen(pkt_entry);
 		efa_rdm_pke_release_rx(pkt_entry);
 	}
@@ -255,12 +263,6 @@ static inline int efa_rdm_cq_populate_src_efa_ep_addr(
 	assert(ep);
 
 	efa_ep_addr->qpn = efa_ibv_cq_wc_read_src_qp(ibv_cq);
-
-	if (pkt_entry->alloc_type == EFA_RDM_PKE_FROM_USER_RX_POOL) {
-		/* Receive packet posted in the zero-copy path does not have a
-		 * header. So we cannot read the connid or the raw address. */
-		return FI_EADDRNOTAVAIL;
-	}
 
 	connid = efa_rdm_pke_connid_ptr(pkt_entry);
 	if (!connid) {
@@ -353,7 +355,7 @@ efa_rdm_cq_lookup_raw_addr(struct efa_rdm_pke *pke,
 				     (void *) efa_ep_addr);
 	if (addr != FI_ADDR_NOTAVAIL) {
 		implicit = false;
-		peer = efa_rdm_ep_get_peer(ep, addr);
+		peer = efa_rdm_ep_get_peer_explicit(ep, addr);
 		assert(peer);
 		goto out;
 	}
@@ -438,7 +440,7 @@ efa_rdm_cq_get_peer_for_pkt_entry(struct efa_rdm_ep *ep,
 			"Peer with gid %d and qpn %d found in explicit AV with "
 			"fi_addr %ld\n",
 			gid, qpn, explicit_fi_addr);
-		peer = efa_rdm_ep_get_peer(ep, explicit_fi_addr);
+		peer = efa_rdm_ep_get_peer_explicit(ep, explicit_fi_addr);
 		goto out;
 	}
 
@@ -521,24 +523,22 @@ static void efa_rdm_cq_handle_recv_completion(struct efa_ibv_cq *ibv_cq, struct 
 {
 	int pkt_type;
 	struct efa_rdm_base_hdr *base_hdr;
-	uint32_t imm_data = 0;
-	bool has_imm_data = false;
+
+#if ENABLE_DEBUG
+	/* Record RECV_COMPLETION event */
+	efa_rdm_pke_record_debug_info(pkt_entry,
+	                               ep->base_ep.qp->qp_num,
+	                               ep->base_ep.qp->qkey,
+	                               pkt_entry->gen,
+	                               EFA_RDM_PKE_DEBUG_EVENT_RECV_COMPLETION);
+#endif
 
 	EFA_DBG(FI_LOG_CQ, "Processing receive completion for packet %p\n", pkt_entry);
 
-	if (pkt_entry->alloc_type == EFA_RDM_PKE_FROM_USER_RX_POOL) {
-		assert(ep->user_rx_pkts_posted > 0);
-		ep->user_rx_pkts_posted--;
-	} else {
-		assert(ep->efa_rx_pkts_posted > 0);
-		ep->efa_rx_pkts_posted--;
-	}
+	assert(ep->efa_rx_pkts_posted > 0);
+	ep->efa_rx_pkts_posted--;
 
 	pkt_entry->pkt_size = efa_ibv_cq_wc_read_byte_len(ibv_cq);
-	if (efa_ibv_cq_wc_read_wc_flags(ibv_cq) & IBV_WC_WITH_IMM) {
-		has_imm_data = true;
-		imm_data = efa_ibv_cq_wc_read_imm_data(ibv_cq);
-	}
 
 	pkt_entry->peer = efa_rdm_cq_get_peer_for_pkt_entry(ep, ibv_cq, pkt_entry);
 
@@ -577,16 +577,6 @@ static void efa_rdm_cq_handle_recv_completion(struct efa_ibv_cq *ibv_cq, struct 
 
 	efa_rdm_ep_post_handshake_or_queue(ep, pkt_entry->peer);
 
-	/**
-	 * Data is already delivered to user posted pkt without pkt hdrs.
-	 */
-	if (pkt_entry->alloc_type == EFA_RDM_PKE_FROM_USER_RX_POOL) {
-		assert(ep->base_ep.user_recv_qp);
-		/* User recv pkts are only posted to the user recv qp */
-		assert(efa_ibv_cq_wc_read_qp_num(ibv_cq) == ep->base_ep.user_recv_qp->qp_num);
-		return efa_rdm_pke_proc_received_no_hdr(pkt_entry, has_imm_data, imm_data);
-	}
-
 	/* Proc receives with pkt hdrs (posted to ctrl QPs)*/
 	base_hdr = efa_rdm_pke_get_base_hdr(pkt_entry);
 	pkt_type = base_hdr->type;
@@ -600,24 +590,6 @@ static void efa_rdm_cq_handle_recv_completion(struct efa_ibv_cq *ibv_cq, struct 
 
 		assert(0 && "invalid REQ packet type");
 		efa_base_ep_write_eq_error(&ep->base_ep, FI_EIO, FI_EFA_ERR_INVALID_PKT_TYPE);
-		efa_rdm_pke_release_rx(pkt_entry);
-		return;
-	}
-
-	/**
-	 * When zero copy recv is turned on, the ep cannot
-	 * handle rtm pkts delivered to the internal bounce buffer,
-	 * because the user recv buffer has been posted to the other
-	 * QP and we cannot cancel that.
-	 */
-	if (OFI_UNLIKELY(ep->use_zcpy_rx && efa_rdm_pkt_type_is_rtm(pkt_type))) {
-		char errbuf[EFA_ERROR_MSG_BUFFER_LENGTH] = {0};
-		size_t errbuf_len;
-
-		/* local & peer host-id & ep address will be logged by efa_rdm_write_error_msg */
-		if (!efa_rdm_write_error_msg(ep, pkt_entry->peer, FI_EFA_ERR_INVALID_PKT_TYPE_ZCPY_RX, errbuf, &errbuf_len))
-			EFA_WARN(FI_LOG_CQ, "Error: %s\n", (const char *) errbuf);
-		efa_base_ep_write_eq_error(&ep->base_ep, FI_EINVAL, FI_EFA_ERR_INVALID_PKT_TYPE_ZCPY_RX);
 		efa_rdm_pke_release_rx(pkt_entry);
 		return;
 	}
@@ -684,7 +656,8 @@ static int efa_rdm_cq_match_ep(struct dlist_entry *item, const void *ep)
 
 static inline struct efa_rdm_ep *efa_rdm_cq_get_rdm_ep(struct efa_ibv_cq *cq, struct efa_domain *efa_domain)
 {
-	struct efa_base_ep *base_ep = efa_domain->qp_table[efa_ibv_cq_wc_read_qp_num(cq) & efa_domain->qp_table_sz_m1]->base_ep;
+	struct efa_base_ep *base_ep = efa_ibv_cq_get_base_ep_from_cur_cqe(cq, efa_domain);
+	assert(base_ep);
 	return container_of(base_ep, struct efa_rdm_ep, base_ep);
 }
 
@@ -747,13 +720,8 @@ enum ibv_wc_status efa_rdm_cq_process_wc_closing_ep(struct efa_ibv_cq *cq, struc
 			break;
 		case IBV_WC_RECV: /* fall through */
 		case IBV_WC_RECV_RDMA_WITH_IMM:
-			if (pkt_entry->alloc_type == EFA_RDM_PKE_FROM_USER_RX_POOL) {
-				assert(ep->user_rx_pkts_posted > 0);
-				ep->user_rx_pkts_posted--;
-			} else {
-				assert(ep->efa_rx_pkts_posted > 0);
-				ep->efa_rx_pkts_posted--;
-			}
+			assert(ep->efa_rx_pkts_posted > 0);
+			ep->efa_rx_pkts_posted--;
 			efa_rdm_cq_increment_pkt_entry_gen(pkt_entry);
 			efa_rdm_pke_release_rx(pkt_entry);
 			break;
@@ -805,9 +773,21 @@ enum ibv_wc_status efa_rdm_cq_process_wc(struct efa_ibv_cq *cq, struct efa_rdm_e
 		case IBV_WC_RECV: /* fall through */
 		case IBV_WC_RECV_RDMA_WITH_IMM:
 			if (efa_cq_wc_is_unsolicited(cq)) {
-				EFA_WARN(FI_LOG_CQ, "Receive error %s (%d) for unsolicited write recv",
+				/*
+				 * libfabric allows NULL op_context for target-side CQ events from RMA writes with CQ data.
+				 * EFA-RDM does not require FI_RX_CQ_DATA, so NULL context is safe here.
+				 */
+				struct fi_cq_err_entry err_entry = {0};
+				
+				EFA_INFO(FI_LOG_CQ, "Receive error %s (%d) for unsolicited write recv",
 					efa_strerror(prov_errno), prov_errno);
-				efa_base_ep_write_eq_error(&ep->base_ep, to_fi_errno(prov_errno), prov_errno);
+				err_entry.op_context = NULL;
+				/*To be consistent with the succeed path. Although man page only refered to: FI_REMOTE_WRITE | FI_REMOTE_CQ_DATA)*/
+				err_entry.flags = FI_REMOTE_CQ_DATA | FI_RMA | FI_REMOTE_WRITE;
+				err_entry.err = to_fi_errno(prov_errno);
+				err_entry.prov_errno = prov_errno;
+
+				efa_rdm_cq_write_error(&ep->base_ep, ep->base_ep.util_ep.rx_cq, &err_entry, "unsolicited recv");
 				break;
 			}
 			assert(pkt_entry);

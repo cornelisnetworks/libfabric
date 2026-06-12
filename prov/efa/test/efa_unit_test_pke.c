@@ -47,8 +47,9 @@ void test_efa_rdm_pke_handle_longcts_rtm_send_completion(struct efa_resource **s
     msg.iov_count = 1;
     msg.msg_iov = &iov;
     msg.desc = NULL;
-    txe = efa_rdm_ep_alloc_txe(efa_rdm_ep, peer, &msg, ofi_op_msg, 0, 0);
+    txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
     assert_non_null(txe);
+    efa_rdm_txe_construct(txe, efa_rdm_ep, peer, &msg, ofi_op_msg, 0, 0);
     txe->internal_flags |= EFA_RDM_OPE_READ_NACK;
 
     /* construct a fallback long cts rtm pkt */
@@ -92,7 +93,7 @@ void test_efa_rdm_pke_release_rx_list(struct efa_resource **state)
     /* Fake a rx pkt entry */
     pke = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
     assert_non_null(pke);
-    efa_rdm_ep->efa_rx_pkts_posted = efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+    efa_rdm_ep->efa_rx_pkts_posted = efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
     /* link multiple pkes to this pke */
     for (i = 1; i < 10; i++) {
@@ -133,7 +134,7 @@ void test_efa_rdm_pke_alloc_rta_rxe(struct efa_resource **state)
 				EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pke);
 	efa_rdm_ep->efa_rx_pkts_posted =
-		efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+		efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
 	/* Create and register a fake peer */
 	assert_int_equal(
@@ -175,7 +176,7 @@ void test_efa_rdm_pke_alloc_rtw_rxe(struct efa_resource **state)
 				EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pke);
 	efa_rdm_ep->efa_rx_pkts_posted =
-		efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+		efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
 	/* Create and register a fake peer */
 	assert_int_equal(
@@ -224,7 +225,7 @@ void test_efa_rdm_pke_alloc_rtr_rxe(struct efa_resource **state)
 				EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pke);
 	efa_rdm_ep->efa_rx_pkts_posted =
-		efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+		efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
 	/* Create and register a fake peer */
 	assert_int_equal(
@@ -265,7 +266,7 @@ void test_efa_rdm_pke_get_unexp(struct efa_resource **state)
 	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool,
 				      EFA_RDM_PKE_FROM_EFA_RX_POOL);
 	assert_non_null(pkt_entry);
-	efa_rdm_ep->efa_rx_pkts_posted = efa_rdm_ep_get_rx_pool_size(efa_rdm_ep);
+	efa_rdm_ep->efa_rx_pkts_posted = efa_base_ep_get_rx_pool_size(&efa_rdm_ep->base_ep);
 
 	unexp_pkt_entry = efa_rdm_pke_get_unexp(&pkt_entry);
 	assert_non_null(unexp_pkt_entry);
@@ -322,8 +323,9 @@ void test_efa_rdm_pke_flag_tracking(struct efa_resource **state)
 	msg.iov_count = 1;
 	msg.msg_iov = &iov;
 	msg.desc = NULL;
-	txe = efa_rdm_ep_alloc_txe(efa_rdm_ep, peer, &msg, ofi_op_msg, 0, 0);
+	txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
 	assert_non_null(txe);
+	efa_rdm_txe_construct(txe, efa_rdm_ep, peer, &msg, ofi_op_msg, 0, 0);
 
 	/* Allocate a packet entry */
 	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);

@@ -1,7 +1,7 @@
 /*
  * SPDX-License-Identifier: BSD-2-Clause OR GPL-2.0-only
  *
- * Copyright (c) 2020 Hewlett Packard Enterprise Development LP
+ * Copyright (c) 2020,2026 Hewlett Packard Enterprise Development LP
  */
 
 #include <stdio.h>
@@ -11,6 +11,10 @@
 
 #include "cxip.h"
 #include "cxip_test_common.h"
+
+#define CXIP_DBG(...) _CXIP_DBG(FI_LOG_MR, __VA_ARGS__)
+#define CXIP_WARN(...) _CXIP_WARN(FI_LOG_MR, __VA_ARGS__)
+#define CXIP_INFO(...) _CXIP_INFO(FI_LOG_MR, __VA_ARGS__)
 
 TestSuite(mr, .init = cxit_setup_rma, .fini = cxit_teardown_rma,
 	  .timeout = CXIT_DEFAULT_TIMEOUT);
@@ -75,6 +79,55 @@ Test(mr, invalid_client_rkey)
 		cr_assert_eq(ret, FI_SUCCESS, "fi_close failed: %d", ret);
 	}
 }
+Test(mr, buf_attr)
+{
+	int ret;
+	struct fi_mr_attr attr = {};
+	struct iovec iov = {};
+	struct fi_mr_dmabuf dbuf = {};
+	struct fid_mr *mr1, *mr2;
+	struct cxip_mr *mr_cxip;
+	uint64_t addr1 = 0, addr2 = 0;
+	uint32_t len1 = 0, len2 = 0, data1 = 0, data2 = 0;
+
+	/* test iov addr/len */
+	iov.iov_len = sizeof(data1);
+	iov.iov_base = (void *)&data1;
+	addr1 = (uint64_t)&data1;
+	len1 = sizeof(data1);
+	attr.mr_iov = &iov;
+	attr.iov_count = 1;
+	attr.access = FI_REMOTE_READ | FI_REMOTE_WRITE;
+	attr.requested_key = 0x123;
+	ret = fi_mr_regattr(cxit_domain, &attr, 0, &mr1);
+	mr_cxip = (struct cxip_mr *)mr1->mem_desc;
+	addr2 = (uint64_t)mr_cxip->buf;
+	len2 = mr_cxip->len;
+	cr_assert_eq(ret, FI_SUCCESS, "fi_mr_regattr failed mr1: %d", ret);
+	cr_assert_eq(addr1, addr2, "address mismatch failed mr1: %lx %lx", addr1, addr2);
+	cr_assert_eq(len1, len2, "length mismatch failed mr1: %d %d", len1, len2);
+	ret = fi_close(&mr1->fid);
+	cr_assert_eq(ret, FI_SUCCESS, "fi_close failed mr1: %d", ret);
+	/* test dmabuf addr/len */
+	/* first clear out iov len/base */
+	iov.iov_len = 0;
+	iov.iov_base = NULL;
+	dbuf.base_addr = &data2;
+	dbuf.len = sizeof(data2);
+	dbuf.offset = 0;
+	addr1 = (uint64_t)&data2;
+	len1 = sizeof(data2);
+	attr.dmabuf = &dbuf;
+	ret = fi_mr_regattr(cxit_domain, &attr, FI_MR_DMABUF, &mr2);
+	mr_cxip = (struct cxip_mr *)mr2->mem_desc;
+	addr2 = (uint64_t)mr_cxip->buf;
+	len2 = mr_cxip->len;
+	cr_assert_eq(ret, FI_SUCCESS, "fi_mr_regattr failed mr2: %d", ret);
+	cr_assert_eq(addr1, addr2, "address mismatch failed mr2: %lx %lx", addr1, addr2);
+	cr_assert_eq(len1, len2, "length mismatch failed mr2: %d %d", len1, len2);
+	ret = fi_close(&mr2->fid);
+	cr_assert_eq(ret, FI_SUCCESS, "fi_close failed mr2: %d", ret);
+}
 
 Test(mr, std_mrs, .timeout = 600, .disabled = true)
 {
@@ -113,6 +166,45 @@ Test(mr, std_mrs, .timeout = 600, .disabled = true)
 	 */
 	for (i = 0; i < mrs; i++)
 		mr_destroy(&std_mrs[i]);
+}
+/* Test append restart sequence is working properly */
+Test(mr, std_mrs_restart, .timeout = 600, .disabled = false)
+{
+	int std_mr_cnt = 16*1024;
+	int mrs = 0;
+	struct mem_region std_mrs[std_mr_cnt];
+	int i, test_loop, max_loop = 2, mrs_limit[2];
+	int ret;
+	uint64_t key;
+
+	for (test_loop = 0; test_loop < max_loop; test_loop++) {
+		memset(std_mrs, 0, sizeof(std_mrs));
+		for (i = 0, mrs = 0; i < std_mr_cnt; i++) {
+			mrs++;
+			key = i + 200;
+			ret = mr_create(8, FI_REMOTE_WRITE, 0, &key, &std_mrs[i]);
+			if (ret) {
+				CXIP_WARN("Created %d mr's in loop %d\n", mrs, test_loop);
+				mrs_limit[test_loop] = mrs;
+				break;
+			}
+		}
+		CXIP_WARN("Destroying %d mr's in loop %d\n", mrs, test_loop);
+		for (i = 0; i < mrs; i++)
+			mr_destroy(&std_mrs[i]);
+
+	}
+	/* These are HW resources so it is difficult
+	 * to determine what the resource state is between loops.
+	 * the important thing is once the max is hit on the first pass,
+	 * the second pass is allowed to create at least 1 memory region
+	 * and append the LE without hitting the no space/ENOMEM error
+	 * after restart sequence is set.
+	 */
+	cr_assert(mrs_limit[1] >= 2, "Failed to append on second loop %d %d %d\n",
+			ret, mrs_limit[0], mrs_limit[1]);
+	CXIP_WARN("Passed second append loop %d %d %d\n", ret, mrs_limit[0], mrs_limit[1]);
+
 }
 
 Test(mr, opt_mr_recycle, .timeout = 600, .disabled = false)

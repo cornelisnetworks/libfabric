@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright Amazon.com, Inc. or its affiliates. All rights reserved. */
 
 #include "efa_unit_tests.h"
+#include "rdm/efa_rdm_pke_cmd.h"
+#include "rdm/efa_rdm_pke_nonreq.h"
 
 typedef void (*efa_rdm_ope_handle_error_func_t)(struct efa_rdm_ope *ope, int err, int prov_errno);
 
@@ -10,15 +12,16 @@ void test_efa_rdm_ope_prepare_to_post_send_impl(struct efa_resource *resource,
 						size_t total_len,
 						int expected_ret,
 						int expected_pkt_entry_cnt,
-						int *expected_pkt_entry_data_size_vec)
+						size_t *expected_pkt_entry_data_size_vec)
 {
 	struct efa_ep_addr raw_addr;
-	struct efa_mr mock_mr;
+	struct efa_rdm_mr mock_mr;
 	struct efa_rdm_ope mock_txe;
 	struct efa_rdm_peer mock_peer;
 	size_t raw_addr_len = sizeof(raw_addr);
 	fi_addr_t addr;
-	int pkt_entry_cnt, pkt_entry_data_size_vec[1024];
+	size_t pkt_entry_cnt;
+	size_t pkt_entry_data_size_vec[1024];
 	int i, err, ret;
 
 	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
@@ -28,7 +31,7 @@ void test_efa_rdm_ope_prepare_to_post_send_impl(struct efa_resource *resource,
 	ret = fi_av_insert(resource->av, &raw_addr, 1, &addr, 0 /* flags */, NULL /* context */);
 	assert_int_equal(ret, 1);
 
-	mock_mr.peer.iface = iface;
+	mock_mr.efa_mr.iface = iface;
 
 	struct efa_rdm_ep *efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 	struct efa_rdm_peer *peer = efa_rdm_ep_get_peer(efa_rdm_ep, 0);
@@ -91,7 +94,7 @@ void test_efa_rdm_ope_prepare_to_post_send_host_memory(struct efa_resource **sta
 	struct efa_resource *resource = *state;
 	size_t msg_length;
 	int expected_pkt_entry_cnt;
-	int expected_pkt_entry_data_size_vec[1024];
+	size_t expected_pkt_entry_data_size_vec[1024];
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 
@@ -140,7 +143,7 @@ void test_efa_rdm_ope_prepare_to_post_send_host_memory_align128(struct efa_resou
 	struct efa_rdm_ep *efa_rdm_ep;
 	size_t msg_length;
 	int expected_pkt_entry_cnt;
-	int expected_pkt_entry_data_size_vec[1024];
+	size_t expected_pkt_entry_data_size_vec[1024];
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
@@ -189,7 +192,7 @@ void test_efa_rdm_ope_prepare_to_post_send_cuda_memory(struct efa_resource **sta
 	struct efa_resource *resource = *state;
 	size_t msg_length;
 	int expected_pkt_entry_cnt;
-	int expected_pkt_entry_data_size_vec[1024];
+	size_t expected_pkt_entry_data_size_vec[1024];
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 
@@ -214,7 +217,7 @@ void test_efa_rdm_ope_prepare_to_post_send_cuda_memory_align128(struct efa_resou
 	struct efa_rdm_ep *efa_rdm_ep;
 	size_t msg_length;
 	int expected_pkt_entry_cnt;
-	int expected_pkt_entry_data_size_vec[1024];
+	size_t expected_pkt_entry_data_size_vec[1024];
 
 	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
 	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
@@ -333,7 +336,7 @@ void test_efa_rdm_rxe_post_local_read_or_queue_impl(struct efa_resource *resourc
 	pkt_entry->payload = pkt_entry->wiredata;
 
 	rxe = efa_rdm_ep_alloc_rxe(efa_rdm_ep, NULL, ofi_op_tagged);
-	cuda_mr.peer.iface = FI_HMEM_CUDA;
+	cuda_mr.iface = FI_HMEM_CUDA;
 
 	rxe->desc[0] = &cuda_mr;
 	rxe->iov_count = 1;
@@ -449,6 +452,107 @@ void test_efa_rdm_txe_handle_error_not_write_cq(struct efa_resource **state)
 	txe->internal_flags |= EFA_RDM_OPE_INTERNAL;
 
 	test_efa_rdm_ope_handle_error_impl(resource, efa_rdm_txe_handle_error, txe, false);
+
+	efa_rdm_txe_release(txe);
+}
+
+/*
+ * When a multi-segment fi_send/fi_write/fi_read posts some segments
+ * and then fails on a later segment, the synchronous error return to
+ * the app is the sole error report for that op. The partial-post fix
+ * sets EFA_RDM_TXE_NO_COMPLETION on the txe so the success-completion
+ * path does not report a spurious CQ entry or counter when the
+ * in-flight segment(s) eventually drain. If one of those in-flight
+ * segments fails instead of succeeds, efa_rdm_txe_handle_error must
+ * also honor EFA_RDM_TXE_NO_COMPLETION, or the app sees a duplicate
+ * error report (one synchronous, one via the error CQ).
+ *
+ * These three tests cover each op type and assert: no error CQ entry
+ * when NO_COMPLETION is set. The counter bump is guarded by the same
+ * conditional, so suppressing the CQ write suppresses both.
+ */
+static
+void test_efa_rdm_txe_handle_error_suppressed_impl(struct efa_resource *resource,
+						   uint32_t op)
+{
+	struct efa_rdm_ope *txe;
+	struct fi_cq_err_entry cq_err = {0};
+	struct fi_cq_data_entry cq_entry;
+
+	txe = efa_unit_test_alloc_txe(resource, op);
+	assert_non_null(txe);
+	txe->internal_flags |= EFA_RDM_TXE_NO_COMPLETION;
+
+	efa_rdm_txe_handle_error(txe, FI_ENOTCONN,
+				 EFA_IO_COMP_STATUS_LOCAL_ERROR_UNREACH_REMOTE);
+
+	/*
+	 * No error CQ entry and no regular CQ entry: NO_COMPLETION
+	 * short-circuits before ofi_cq_write_error() and
+	 * efa_cntr_report_error().
+	 */
+	assert_int_equal(fi_cq_read(resource->cq, &cq_entry, 1), -FI_EAGAIN);
+	assert_int_equal(fi_cq_readerr(resource->cq, &cq_err, 0), -FI_EAGAIN);
+
+	efa_rdm_txe_release(txe);
+}
+
+void test_efa_rdm_txe_handle_error_suppressed_write(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	test_efa_rdm_txe_handle_error_suppressed_impl(resource, ofi_op_write);
+}
+
+void test_efa_rdm_txe_handle_error_suppressed_read(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	test_efa_rdm_txe_handle_error_suppressed_impl(resource, ofi_op_read_req);
+}
+
+void test_efa_rdm_txe_handle_error_suppressed_send(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+	test_efa_rdm_txe_handle_error_suppressed_impl(resource, ofi_op_msg);
+}
+
+/*
+ * All fi_inject* entry points (fi_inject, fi_injectdata, fi_tinject,
+ * fi_tinjectdata, fi_inject_write, fi_inject_writedata,
+ * fi_inject_atomic) set EFA_RDM_TXE_NO_COMPLETION on the txe to
+ * suppress the success CQ per inject semantics, but also set
+ * FI_INJECT in fi_flags. Per the libfabric fi_msg/fi_rma man pages,
+ * an inject op that succeeds synchronously but later fails
+ * asynchronously MUST still report an error CQ entry. Verify that
+ * efa_rdm_txe_handle_error does NOT suppress the error CQ when
+ * FI_INJECT is set, even though NO_COMPLETION is also set.
+ */
+void test_efa_rdm_txe_handle_error_inject_still_reports_cq_error(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ope *txe;
+	struct fi_cq_err_entry cq_err = {0};
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	txe = efa_unit_test_alloc_txe(resource, ofi_op_write);
+	assert_non_null(txe);
+	txe->fi_flags |= FI_INJECT;
+	txe->internal_flags |= EFA_RDM_TXE_NO_COMPLETION;
+
+	efa_rdm_txe_handle_error(txe, FI_ENOTCONN,
+				 EFA_IO_COMP_STATUS_LOCAL_ERROR_UNREACH_REMOTE);
+
+	/* Error CQ entry must be present despite NO_COMPLETION. */
+	assert_int_equal(fi_cq_readerr(resource->cq, &cq_err, 0), 1);
+	assert_int_equal(cq_err.err, FI_ENOTCONN);
+	assert_int_equal(cq_err.prov_errno,
+			 EFA_IO_COMP_STATUS_LOCAL_ERROR_UNREACH_REMOTE);
 
 	efa_rdm_txe_release(txe);
 }
@@ -597,8 +701,9 @@ void test_efa_rdm_txe_prepare_local_read_pkt_entry(struct efa_resource **state)
 	assert_int_equal(fi_endpoint(resource->domain, resource->info, &ep, NULL), 0);
 	efa_rdm_ep = container_of(ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
 
-	txe = efa_rdm_ep_alloc_txe(efa_rdm_ep, NULL, &msg, ofi_op_msg, 0, 0);
+	txe = ofi_buf_alloc(efa_rdm_ep->ope_pool);
 	assert_non_null(txe);
+	efa_rdm_txe_construct(txe, efa_rdm_ep, NULL, &msg, ofi_op_msg, 0, 0);
 
 	/* Use ooo rx pkt because it doesn't have mr so a read_copy pkt clone is enforced. */
 	pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->rx_ooo_pkt_pool, EFA_RDM_PKE_FROM_OOO_POOL);
@@ -1066,4 +1171,454 @@ void test_efa_rdm_ope_eor_packet_failed_posting(struct efa_resource **state)
 void test_efa_rdm_ope_eor_packet_tracking_unresponsive_wait_send(struct efa_resource **state)
 {
 	test_efa_rdm_ope_ack_packet_tracking_unresponsive_wait_send_common(state, EFA_RDM_EOR_PKT);
+}
+
+/**
+ * @brief Test that atomic_ex.compare_desc array is properly copied
+ * and persists after the caller's stack frame is destroyed
+ *
+ * This test verifies the compare_desc fix where compare_desc was a
+ * pointer to stack memory that became dangling.
+ *
+ * @param[in]	state	struct efa_resource that is managed by the framework
+ */
+void test_efa_rdm_atomic_compare_desc_persistence(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_unit_test_buff send_buff, result_buff, compare_buff;
+	struct efa_ep_addr raw_addr;
+	size_t raw_addr_len = sizeof(raw_addr);
+	fi_addr_t addr;
+	uint64_t operand = 0x1234567890ABCDEF;
+	uint64_t compare = 0;
+	void *desc_array[1];
+	void *result_desc_array[1];
+	int ret;
+	struct fi_ioc ioc = {0};
+	struct fi_ioc compare_ioc = {0};
+	struct fi_ioc result_ioc = {0};
+	struct fi_rma_ioc rma_ioc = {0};
+	struct fi_msg_atomic msg = {0};
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_peer *peer;
+	struct efa_rdm_ope *txe;
+
+	/* disable shm to force using efa device to send */
+	efa_unit_test_resource_construct_rdm_shm_disabled(resource);
+
+	/* Setup peer address */
+	ret = fi_getname(&resource->ep->fid, &raw_addr, &raw_addr_len);
+	assert_int_equal(ret, 0);
+	raw_addr.qpn = 1;
+	raw_addr.qkey = 0x1234;
+	ret = fi_av_insert(resource->av, &raw_addr, 1, &addr, 0, NULL);
+	assert_int_equal(ret, 1);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+	peer = efa_rdm_ep_get_peer(efa_rdm_ep, addr);
+	peer->flags = EFA_RDM_PEER_REQ_SENT;
+	peer->is_local = false;
+
+	/* Setup buffers */
+	efa_unit_test_buff_construct(&send_buff, resource, sizeof(uint64_t));
+	efa_unit_test_buff_construct(&result_buff, resource, sizeof(uint64_t));
+	efa_unit_test_buff_construct(&compare_buff, resource, sizeof(uint64_t));
+
+	memcpy(send_buff.buff, &operand, sizeof(uint64_t));
+	memcpy(compare_buff.buff, &compare, sizeof(uint64_t));
+
+	/* Create desc array on stack */
+	desc_array[0] = fi_mr_desc(send_buff.mr);
+	result_desc_array[0] = fi_mr_desc(result_buff.mr);
+	void *compare_desc_array[1];
+	compare_desc_array[0] = fi_mr_desc(compare_buff.mr);
+	void *original_desc_value = compare_desc_array[0];
+
+	ioc.addr = send_buff.buff;
+	ioc.count = 1;
+	compare_ioc.addr = compare_buff.buff;
+	compare_ioc.count = 1;
+	result_ioc.addr = result_buff.buff;
+	result_ioc.count = 1;
+
+	msg.msg_iov = &ioc;
+	msg.desc = desc_array;
+	msg.iov_count = 1;
+	msg.addr = addr;
+	msg.rma_iov = &rma_ioc;
+	msg.rma_iov_count = 1;
+	msg.datatype = FI_UINT64;
+	msg.op = FI_CSWAP;
+
+	/*
+	 * Mock efa_qp_post_send to succeed so the compare atomic completes.
+	 * The test verifies that compare_desc is properly copied into the txe
+	 * (not just a pointer to the caller's stack array).
+	 */
+	g_efa_unit_test_mocks.efa_qp_post_send = &efa_mock_efa_qp_post_send_return_mock;
+	will_return_int(efa_mock_efa_qp_post_send_return_mock, 0);
+
+	ret = fi_compare_atomicmsg(resource->ep, &msg, &compare_ioc, compare_desc_array, 1,
+				   &result_ioc, result_desc_array, 1, 0);
+	assert_int_equal(ret, 0);
+
+	/* Destroy stack array to simulate function return */
+	compare_desc_array[0] = (void *)(uintptr_t)0xDEADBEEF;
+
+	/* Retrieve the txe from the txe_list */
+	assert_false(dlist_empty(&efa_rdm_ep->txe_list));
+	txe = container_of(efa_rdm_ep->txe_list.next, struct efa_rdm_ope, ep_entry);
+
+	/* Verify compare_desc was copied, not just pointer stored */
+	assert_ptr_equal(txe->atomic_ex.compare_desc[0], original_desc_value);
+
+	efa_unit_test_buff_destruct(&send_buff);
+	efa_unit_test_buff_destruct(&result_buff);
+	efa_unit_test_buff_destruct(&compare_buff);
+}
+
+/**
+ * @brief Common helper for DC packet TXE release testing
+ *
+ * Sets up test environment and packet entries for DC packet testing.
+ * Tests the specified completion order and verifies TXE release behavior.
+ *
+ * @param[in] resource Test resource structure
+ * @param[in] send_first If true, send completion happens first; if false, receipt first
+ */
+/**
+ * @brief Common helper for DC packet TXE release testing
+ *
+ * Sets up test environment and packet entries for DC packet testing.
+ * Tests the specified completion order and verifies TXE release behavior.
+ *
+ * @param[in] resource Test resource structure
+ * @param[in] send_first If true, send completion happens first; if false, receipt first
+ * @param[in] txe_in_send_state If true, TXE is in EFA_RDM_OPE_SEND state; if false, different state
+ */
+static void test_efa_rdm_txe_dc_release_common(struct efa_resource *resource, bool send_first, bool txe_in_send_state)
+{
+	struct efa_rdm_ep *efa_rdm_ep;
+	struct efa_rdm_ope *txe;
+	struct efa_rdm_pke *dc_pkt_entry, *receipt_pkt_entry;
+	struct efa_rdm_receipt_hdr *receipt_hdr;
+
+	efa_unit_test_resource_construct(resource, FI_EP_RDM, EFA_FABRIC_NAME);
+
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	/* Allocate TXE and set up for DC operation */
+	txe = efa_unit_test_alloc_txe(resource, ofi_op_msg);
+	assert_non_null(txe);
+	txe->internal_flags |= EFA_RDM_TXE_DELIVERY_COMPLETE_REQUESTED;
+	txe->efa_outstanding_tx_ops = 1;
+
+	if (txe_in_send_state) {
+		/* Add TXE to ope_longcts_send_list to simulate active longcts send */
+		txe->state = EFA_RDM_OPE_SEND;
+		dlist_insert_tail(&txe->entry, &efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list);
+		assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list), 1);
+	} else {
+		/* TXE is not in SEND state (e.g., eager DC TXE) */
+		txe->state = EFA_RDM_TXE_REQ;
+		assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list), 0);
+	}
+
+	/* Create fake DC packet entry */
+	dc_pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_tx_pkt_pool, EFA_RDM_PKE_FROM_EFA_TX_POOL);
+	assert_non_null(dc_pkt_entry);
+	dc_pkt_entry->ope = txe;
+	dc_pkt_entry->ep = efa_rdm_ep;
+	dc_pkt_entry->peer = txe->peer;
+	struct efa_rdm_base_hdr *base_hdr = (struct efa_rdm_base_hdr *)dc_pkt_entry->wiredata;
+	if (txe_in_send_state) {
+		/* CTSDATA packet is sent when ope is in send state */
+		base_hdr->type = EFA_RDM_CTSDATA_PKT;
+		dc_pkt_entry->flags |= EFA_RDM_PKE_DC_LONGCTS_DATA;
+		struct efa_rdm_ctsdata_hdr *ctsdata_hdr = efa_rdm_pke_get_ctsdata_hdr(dc_pkt_entry);
+		ctsdata_hdr->seg_length = 0;
+	} else {
+		base_hdr->type = EFA_RDM_DC_EAGER_MSGRTM_PKT;
+	}
+
+	/* Create fake receipt packet entry */
+	receipt_pkt_entry = efa_rdm_pke_alloc(efa_rdm_ep, efa_rdm_ep->efa_rx_pkt_pool, EFA_RDM_PKE_FROM_EFA_RX_POOL);
+	assert_non_null(receipt_pkt_entry);
+	receipt_pkt_entry->ope = txe;
+	receipt_pkt_entry->ep = efa_rdm_ep;
+	/* Set tx_id so efa_rdm_pke_handle_receipt_recv can look up the txe */
+	receipt_hdr = efa_rdm_pke_get_receipt_hdr(receipt_pkt_entry);
+	receipt_hdr->tx_id = txe->tx_id;
+
+	/* Verify TXE is not ready for release initially */
+	assert_false(efa_rdm_txe_dc_ready_for_release(txe));
+	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list), 1);
+
+	if (send_first) {
+		/* Send completion first - should not release TXE yet */
+		efa_rdm_pke_handle_send_completion(dc_pkt_entry);
+		assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list), 1);
+		assert_false(efa_rdm_txe_dc_ready_for_release(txe));
+		if (txe_in_send_state) {
+			/* TXE should still be in ope_longcts_send_list */
+			assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list), 1);
+			assert_int_equal(txe->state, EFA_RDM_OPE_SEND);
+		} else {
+			/* Non-long-cts TXE should not be in the list */
+			assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list), 0);
+			assert_int_equal(txe->state, EFA_RDM_TXE_REQ);
+		}
+
+		/* Receipt handling - should set flag and release TXE */
+		efa_rdm_pke_handle_receipt_recv(receipt_pkt_entry);
+		if (txe_in_send_state) {
+			/* Should remove from list */
+			assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list), 0);
+		}
+	} else {
+		/* Receipt handling first - should set flag but not release TXE yet */
+		efa_rdm_pke_handle_receipt_recv(receipt_pkt_entry);
+		assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list), 1);
+		assert_true(txe->internal_flags & EFA_RDM_TXE_RECEIPT_RECEIVED);
+		assert_false(efa_rdm_txe_dc_ready_for_release(txe));
+		if (txe_in_send_state) {
+			/* TXE should be removed from ope_longcts_send_list immediately */
+			assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep_domain(efa_rdm_ep)->ope_longcts_send_list), 0);
+		}
+
+		/* Send completion - should now release TXE */
+		efa_rdm_pke_handle_send_completion(dc_pkt_entry);
+	}
+
+	/* Verify TXE is released */
+	assert_int_equal(efa_unit_test_get_dlist_length(&efa_rdm_ep->txe_list), 0);
+}
+
+/**
+ * @brief Test DC packet TXE release with send completion first (TXE in SEND state)
+ *
+ * This test verifies the DC (Delivery Complete) TXE release logic when
+ * send completion arrives before receipt acknowledgment for long-cts TXEs.
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_rdm_txe_dc_send_first(struct efa_resource **state)
+{
+	test_efa_rdm_txe_dc_release_common(*state, true, true);
+}
+
+/**
+ * @brief Test DC packet TXE release with receipt completion first (TXE in SEND state)
+ *
+ * This test verifies the race condition fix where receipt acknowledgment
+ * arrives before send completion. The TXE should only be released when
+ * both conditions are met, regardless of order.
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_rdm_txe_dc_receipt_first(struct efa_resource **state)
+{
+	test_efa_rdm_txe_dc_release_common(*state, false, true);
+}
+
+/**
+ * @brief Test DC packet TXE release with send completion first (TXE not in SEND state)
+ *
+ * This test verifies the DC TXE release logic for non-long-cts TXEs when
+ * send completion arrives before receipt acknowledgment.
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_rdm_txe_dc_send_first_non_longcts(struct efa_resource **state)
+{
+	test_efa_rdm_txe_dc_release_common(*state, true, false);
+}
+
+/**
+ * @brief Test DC packet TXE release with receipt completion first (TXE not in SEND state)
+ *
+ * This test verifies the bug fix where non-long-cts TXEs get the
+ * EFA_RDM_TXE_RECEIPT_RECEIVED flag set, allowing proper release.
+ *
+ * @param[in] state cmocka state variable
+ */
+void test_efa_rdm_txe_dc_receipt_first_non_longcts(struct efa_resource **state)
+{
+	test_efa_rdm_txe_dc_release_common(*state, false, false);
+}
+
+/* RDM MSG 0-byte tests */
+void test_efa_rdm_msg_send_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct efa_rdm_ep *efa_rdm_ep;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+	efa_rdm_ep = container_of(resource->ep, struct efa_rdm_ep, base_ep.util_ep.ep_fid);
+
+	assert_int_equal(efa_rdm_ep->efa_outstanding_tx_ops, 0);
+	ret = fi_send(resource->ep, NULL, 0, NULL, addr, NULL);
+	assert_int_equal(ret, 0);
+	assert_int_equal(efa_rdm_ep->efa_outstanding_tx_ops, 1);
+}
+
+void test_efa_rdm_msg_sendv_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	struct iovec iov = {0};
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_sendv(resource->ep, &iov, NULL, 0, addr, NULL);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_msg_sendmsg_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	struct iovec iov = {0};
+	struct fi_msg msg = {0};
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	efa_unit_test_construct_msg(&msg, &iov, 0, addr, NULL, 0, NULL);
+
+	ret = fi_sendmsg(resource->ep, &msg, 0);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_msg_senddata_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_senddata(resource->ep, NULL, 0, NULL, 0, addr, NULL);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_msg_inject_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_inject(resource->ep, NULL, 0, addr);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_msg_injectdata_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_injectdata(resource->ep, NULL, 0, 0, addr);
+	assert_int_equal(ret, 0);
+}
+
+/* RDM Tagged 0-byte tests */
+void test_efa_rdm_tagged_send_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_tsend(resource->ep, NULL, 0, NULL, addr, 0, NULL);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_tagged_sendv_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	struct iovec iov = {0};
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_tsendv(resource->ep, &iov, NULL, 0, addr, 0, NULL);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_tagged_sendmsg_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	struct iovec iov = {0};
+	struct fi_msg_tagged tmsg = {0};
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	efa_unit_test_construct_tmsg(&tmsg, &iov, 0, addr, NULL, 0, NULL, 0, 0);
+
+	ret = fi_tsendmsg(resource->ep, &tmsg, 0);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_tagged_senddata_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_tsenddata(resource->ep, NULL, 0, NULL, 0, addr, 0, NULL);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_tagged_inject_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_tinject(resource->ep, NULL, 0, addr, 0);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_tagged_injectdata_0_byte_no_shm(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	ret = fi_tinjectdata(resource->ep, NULL, 0, 0, addr, 0);
+	assert_int_equal(ret, 0);
+}
+
+void test_efa_rdm_msg_send_0_byte_with_inject_flag(struct efa_resource **state)
+{
+	struct efa_resource *resource = *state;
+	struct iovec iov = {0};
+	struct fi_msg msg = {0};
+	fi_addr_t addr;
+	int ret;
+
+	efa_unit_test_rdm_0byte_prep(resource, &addr);
+
+	efa_unit_test_construct_msg(&msg, &iov, 0, addr, NULL, 0, NULL);
+
+	ret = fi_sendmsg(resource->ep, &msg, FI_INJECT);
+	assert_int_equal(ret, 0);
 }
