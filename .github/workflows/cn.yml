@@ -51,3 +51,7 @@ jobs:
     needs: [opa100, cn5000]
     if: "${{ github.repository == 'cornelisnetworks/libfabric-internal' && contains(github.event.pull_request.labels.*.name, 'CI: Full Suite') }}"
     uses: cornelisnetworks/libfabric-devel/.github/workflows/ci-cleanup.yml@master
+  final-cleanup:
+    name: Final Clean Up
+    if: "${{ github.repository == 'cornelisnetworks/libfabric-internal' && github.event_name == 'pull_request' && github.event.action == 'closed' }}"
+    uses: cornelisnetworks/libfabric-devel/.github/workflows/ci-cleanup.yml@master
