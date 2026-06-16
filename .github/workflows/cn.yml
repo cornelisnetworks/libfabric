@@ -48,8 +48,8 @@ jobs:
       OPXR_ELASTICSEARCH_CREDENTIALS: ${{ secrets.OPXR_ELASTICSEARCH_CREDENTIALS }}
   cleanup:
     name: Clean Up
-    needs: [opa100, cn5000]
-    if: "${{ github.repository == 'cornelisnetworks/libfabric-internal' && contains(github.event.pull_request.labels.*.name, 'CI: Full Suite') }}"
+    needs: [smoke-test, opa100, cn5000]
+    if: "${{ github.repository == 'cornelisnetworks/libfabric-internal' && github.event.action != 'closed' }}"
     uses: cornelisnetworks/libfabric-devel/.github/workflows/ci-cleanup.yml@master
   final-cleanup:
     name: Final Clean Up
