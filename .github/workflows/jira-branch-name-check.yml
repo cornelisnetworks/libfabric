@@ -1,0 +1,33 @@
+# jira-branch-name-check-caller.yml — template caller for Jira branch-name checks
+#
+# Deploy this template to each of the 21 Tier A repos as the thin caller for:
+#   cornelisnetworks/cn-ai-tools/.github/workflows/jira-branch-name-check.yml@main
+#
+# Per-repo customization is limited to:
+#   1. mode: warn | enforce | enforce+bug-strict
+#   2. key_namespaces: pipe-separated Jira key namespace list
+#
+# Per-repo default branch varies: ifs-all=opa-dev, libfabric-internal=develop,
+# openbmc-linux=dev-6.6, wfr-linux-devel=a-stream-master, else master/main.
+# Do not deploy this template to target repos here; deployment is a separate step.
+
+name: Jira Branch Name Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  jira-branch-name-check:
+    name: Jira Branch Name Check
+    uses: cornelisnetworks/cn-ai-tools/.github/workflows/jira-branch-name-check.yml@main
+    with:
+      mode: warn
+      key_namespaces: STL|STLSB|ASIC|DEVOPS|STLSW
+      reserved_prefixes: docs test dev nojira
+      upstream_sync_prefixes: upstream-sync cherry-pick backport fanout
+    secrets: inherit
