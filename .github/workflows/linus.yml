@@ -1,0 +1,44 @@
+# linus-caller.yml
+# Location: <each-repo>/.github/workflows/linus.yml
+# Purpose: Thin caller that delegates to the shared reusable Linus review
+#          workflow in cn-ai-tools. Mirrors the jira.yml caller pattern.
+#
+# All review logic (request -> poll -> publish, 524 recovery, reviewer-mode
+# auto-detect) lives in cn-ai-tools/.github/workflows/linus-review.yml.
+# This file only listens for PR events and forwards them.
+#
+# Behavior:
+#   - Runs on every non-draft PR (opened, synchronize, reopened, ready_for_review).
+#   - reviewer_mode is omitted => Linus auto-detects from the diff
+#     (RTL > kernel-C > automation > adversarial).
+#   - publish: true => eligible P0/P1 findings post as inline PR comments.
+#   - PRs labeled `linus_review_off` are skipped by the reusable workflow.
+#   - Draft PRs are skipped by the reusable workflow's `if:` guard.
+
+name: Linus PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Serialize per-PR so a new push cancels an in-flight review for the same PR.
+concurrency:
+  group: linus-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Publishing is performed by the Linus host via its own API; GITHUB_TOKEN only
+# needs read to fetch PR context. pull-requests:write is granted so the reusable
+# workflow can annotate the PR if configured to do so.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  linus:
+    # @main = always use the latest reusable workflow; pin to @v1 or @<sha>
+    # for stricter supply-chain control.
+    uses: cornelisnetworks/cn-ai-tools/.github/workflows/linus-review.yml@main
+    with:
+      # reviewer_mode omitted => Linus auto-detects the mode from the diff.
+      invocation_source: github_pr
+      publish: true
