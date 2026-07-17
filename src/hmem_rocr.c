@@ -445,6 +445,21 @@ static bool rocr_hsa_agents_equal(hsa_agent_t a, hsa_agent_t b)
 	return a.handle == b.handle;
 }
 
+static int rocr_get_device_from_hsa_agent(hsa_agent_t agent, uint64_t *device)
+{
+	if (!device || !rocr_hsa_agent_is_valid(agent))
+		return -FI_EINVAL;
+
+	for (uint64_t i = 0; i < rocr_agents.num_gpu; i++) {
+		if (rocr_hsa_agents_equal(agent, rocr_agents.gpu_agents[i])) {
+			*device = i;
+			return FI_SUCCESS;
+		}
+	}
+
+	return -FI_ENODEV;
+}
+
 static bool rocr_hsa_pointer_is_imported(uint32_t type)
 {
 	return type == HSA_EXT_POINTER_TYPE_IPC ||
@@ -799,7 +814,18 @@ bool rocr_is_addr_valid(const void *addr, uint64_t *device, uint64_t *flags)
 						 (void *) &hsa_dev_type);
 		if (hsa_ret == HSA_STATUS_SUCCESS) {
 			if (hsa_dev_type == HSA_DEVICE_TYPE_GPU) {
-				/* TODO get device pointer/id */
+				if (device) {
+					int ret = rocr_get_device_from_hsa_agent(hsa_info.agentOwner,
+										 device);
+					if (ret) {
+						FI_WARN(&core_prov, FI_LOG_CORE,
+							"Failed to map ROCR HSA agent 0x%lx to a device ordinal: %s\n",
+							hsa_info.agentOwner.handle,
+							fi_strerror(-ret));
+						return false;
+					}
+				}
+
 				if (flags)
 					*flags = FI_HMEM_DEVICE_ONLY;
 				return true;
@@ -905,8 +931,22 @@ rocr_hsa_agent_callback(hsa_agent_t agent, void* data)
 	hsa_device_type_t device_type;
 
 	ofi_hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
-	if (device_type == HSA_DEVICE_TYPE_GPU)
+	if (device_type == HSA_DEVICE_TYPE_GPU) {
+/*
+ * gpu_agents[] is the authoritative source for ROCr device ordinals.
+ * If this fixed table overflows, keep initialization alive but do not
+ * assign ordinals for unrecorded agents. A future cleanup should replace
+ * the fixed MAX_AGENTS table with dynamically sized storage so every
+ * visible GPU agent can be recorded.
+ */
+		if (rocr_agents.num_gpu >= MAX_AGENTS) {
+			FI_WARN(&core_prov, FI_LOG_CORE,
+				"ROCR GPU agent table is full; MAX_AGENTS=%d, cannot record additional GPU agent 0x%lx\n",
+				MAX_AGENTS, agent.handle);
+			return HSA_STATUS_SUCCESS;
+		}
 		rocr_agents.gpu_agents[rocr_agents.num_gpu++] = agent;
+	}
 
 	return HSA_STATUS_SUCCESS;
 }
