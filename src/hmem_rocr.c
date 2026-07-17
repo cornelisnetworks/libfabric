@@ -652,12 +652,12 @@ rocr_dev_async_copy(void *dst, const void *src, size_t size,
 	ret = rocr_host_memory_ptr((void *)src, &src_hsa_ptr, &agents[0],
 				   NULL, &src_offset, &src_local, &src_type);
 	if (ret != FI_SUCCESS)
-		return ret;
+		goto fail;
 
 	ret = rocr_host_memory_ptr(dst, &dst_hsa_ptr, &agents[1], NULL,
 				   &dst_offset, &dst_local, &dst_type);
 	if (ret != FI_SUCCESS)
-		return ret;
+		goto fail;
 
 	ofi_spin_lock(&fs_lock);
 	s->sinfo[s->num_signals] = ofi_freestack_pop(ipc_signal_fs);
