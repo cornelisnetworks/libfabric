@@ -875,26 +875,12 @@ int rocr_get_handle(void *dev_buf, size_t size, void **handle)
 
 int rocr_open_handle(void **handle, size_t len, uint64_t device, void **ipc_ptr)
 {
-	hsa_agent_t  *agent;
 	hsa_status_t hsa_ret;
 
-	if (rocr_agents.num_gpu == 0) {
-		FI_WARN(&core_prov, FI_LOG_CORE,
-			"Cannot open ROCR IPC handle without a local GPU agent\n");
-		return -FI_EINVAL;
-	}
-
-	if (device >= rocr_agents.num_gpu) {
-		FI_WARN(&core_prov, FI_LOG_CORE,
-			"Cannot open ROCR IPC handle for invalid GPU device %lu, num_gpu=%d\n",
-			device, rocr_agents.num_gpu);
-		return -FI_EINVAL;
-	}
-
-	agent = &rocr_agents.gpu_agents[device];
-
 	hsa_ret = hsa_ops.hsa_amd_ipc_memory_attach((hsa_amd_ipc_memory_t *)handle,
-					len, 1, agent, ipc_ptr);
+					len, (uint32_t) rocr_agents.num_gpu,
+					rocr_agents.num_gpu ? rocr_agents.gpu_agents : NULL,
+					ipc_ptr);
 	if (hsa_ret != HSA_STATUS_SUCCESS) {
 		FI_WARN(&core_prov, FI_LOG_CORE,
 			"Failed to perform hsa_amd_ipc_memory_attach: %s\n",
@@ -902,7 +888,9 @@ int rocr_open_handle(void **handle, size_t len, uint64_t device, void **ipc_ptr)
 		return -FI_EINVAL;
 	}
 
-	hsa_ret = ofi_hsa_amd_agents_allow_access(1, agent, NULL, *ipc_ptr);
+	hsa_ret = ofi_hsa_amd_agents_allow_access(rocr_agents.num_gpu,
+						    rocr_agents.gpu_agents, NULL,
+						    *ipc_ptr);
 	if (hsa_ret == HSA_STATUS_SUCCESS)
 		return FI_SUCCESS;
 
