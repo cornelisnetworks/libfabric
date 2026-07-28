@@ -63,3 +63,13 @@ fi_rdm_cntr_pingpong
 
 # The 32-thread bandwidth cases can exhaust available OPX contexts
 fi_rdm_bw_mt -n 32
+
+# rdm_multi_client hangs when a long-lived server's peer subcontext identity
+# (LID + HFI subcontext) is recycled by a new, unrelated client process after
+# the prior client exits.  The server's reliability layer keys flow state by
+# that identity and misreads the new client's traffic as a stale duplicate of
+# the old client's session, silently dropping it.  Fixing this correctly
+# requires a sender-initiated resynchronization handshake (existing DAOS
+# resync mechanism generalized for non-DAOS builds); tracked as a known
+# limitation until that work lands.
+fi_rdm_multi_client
