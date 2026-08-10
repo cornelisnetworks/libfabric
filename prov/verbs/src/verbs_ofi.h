@@ -211,8 +211,8 @@ extern struct vrb_gl_data {
 		char	*xrcd_filename;
 	} msg;
 
-	bool	peer_mem_support;
-	bool	dmabuf_support;
+	int	peer_mem_support;
+	int	dmabuf_support;
 
 	vrb_nic_affinity_handler_t	nic_affinity_handler;
 	char	*nic_affinity_policy;
@@ -338,8 +338,6 @@ struct vrb_eq {
 
 	ofi_epoll_t		epollfd;
 	enum fi_wait_obj	wait_obj;
-	ofi_atomic32_t		ref;
-
 
 	struct {
 		/* The connection key map is used during the XRC connection
@@ -446,9 +444,6 @@ struct vrb_domain {
 	/* for profiling */
 	vrb_profile_t		*profile;
 };
-
-int vrb_eq_attach_domain(struct vrb_eq *eq, struct vrb_domain *domain);
-int vrb_eq_detach_domain(struct vrb_domain *domain);
 
 struct vrb_cq;
 

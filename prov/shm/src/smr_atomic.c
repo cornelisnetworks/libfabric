@@ -60,11 +60,12 @@ static void smr_format_inline_atomic(struct smr_cmd *cmd, struct ofi_mr **mr,
 static void smr_do_atomic_inline(
 			struct smr_ep *ep, struct smr_region *peer_smr,
 			int64_t tx_id, int64_t rx_id, uint32_t op,
-			uint64_t op_flags, uint8_t datatype, uint8_t atomic_op,
+			uint8_t datatype, uint8_t atomic_op,
 			struct ofi_mr **desc, const struct iovec *iov,
-			size_t iov_count, size_t total_len, struct smr_cmd *cmd)
+			size_t iov_count, size_t total_len, uint8_t smr_flags,
+			struct smr_cmd *cmd)
 {
-	smr_generic_format(cmd, tx_id, rx_id, op, 0, 0, op_flags);
+	smr_generic_format(cmd, tx_id, rx_id, op, 0, 0, smr_flags);
 	smr_generic_atomic_format(cmd, datatype, atomic_op);
 	smr_format_inline_atomic(cmd, desc, iov, iov_count);
 }
@@ -74,14 +75,11 @@ static void smr_format_inject_atomic(
 			const struct iovec *iov, size_t count,
 			const struct iovec *resultv, size_t result_count,
 			struct ofi_mr **comp_desc, const struct iovec *compv,
-			size_t comp_count, struct smr_region *smr)
+			size_t comp_count, struct smr_inject_buf *tx_buf)
 {
-	struct smr_inject_buf *tx_buf;
 	size_t comp_size;
 
 	cmd->hdr.proto = smr_proto_inject;
-
-	tx_buf = smr_get_inject_buf(smr, cmd);
 	switch (cmd->hdr.op) {
 	case ofi_op_atomic:
 		cmd->hdr.size = ofi_copy_from_mr_iov(
@@ -114,7 +112,7 @@ static void smr_format_inject_atomic(
 	}
 }
 
-static ssize_t smr_do_atomic_inject(
+static int smr_do_atomic_inject(
 			struct smr_ep *ep, struct smr_region *peer_smr,
 			int64_t tx_id, int64_t rx_id, uint32_t op,
 			uint64_t op_flags, uint8_t datatype, uint8_t atomic_op,
@@ -123,18 +121,33 @@ static ssize_t smr_do_atomic_inject(
 			const struct iovec *resultv, size_t result_count,
 			struct ofi_mr **comp_desc, const struct iovec *compv,
 			size_t comp_count, size_t total_len, void *context,
-			uint16_t smr_flags, struct smr_cmd *cmd)
+			uint8_t smr_flags, struct smr_cmd *cmd)
 {
 	struct smr_pend_entry *pend;
+	struct smr_inject_buf *tx_buf;
 
-	smr_generic_format(cmd, tx_id, rx_id, op, 0, 0, op_flags);
+	if (op == ofi_op_atomic_compare || op == ofi_op_atomic_fetch) {
+		smr_flags |= SMR_RETURN_CMD;
+		tx_buf = smr_get_inject_buf(ep->region);
+		cmd->hdr.proto_data = smr_get_offset(ep->region, tx_buf);
+	} else {
+		tx_buf = smr_get_inject_buf(peer_smr);
+		cmd->hdr.proto_data = smr_get_offset(peer_smr, tx_buf);
+	}
+	if (!tx_buf) {
+		FI_DBG(&smr_prov, FI_LOG_EP_DATA,
+		       "No inject buffers available, cannot send inject "
+		       "message\n");
+		return -FI_EAGAIN;
+	}
+
+	smr_generic_format(cmd, tx_id, rx_id, op, 0, 0, smr_flags);
 	smr_generic_atomic_format(cmd, datatype, atomic_op);
 	smr_format_inject_atomic(cmd, desc, iov, iov_count, resultv,
 				 result_count, comp_desc, compv, comp_count,
-				 ep->region);
+				 tx_buf);
 
-	if (op == ofi_op_atomic_fetch || op == ofi_op_atomic_compare ||
-	    atomic_op == FI_ATOMIC_READ || op_flags & FI_DELIVERY_COMPLETE) {
+	if (smr_flags & SMR_RETURN_CMD) {
 		pend = ofi_buf_alloc(ep->pend_pool);
 		assert(pend);
 		cmd->hdr.tx_ctx = (uintptr_t) pend;
@@ -148,13 +161,18 @@ static ssize_t smr_do_atomic_inject(
 }
 
 static int smr_select_atomic_proto(uint32_t op, uint64_t total_len,
-				   uint64_t op_flags)
+				   uint64_t op_flags, uint8_t *smr_flags)
 {
+	*smr_flags = 0;
+	assert(!(op_flags & FI_REMOTE_CQ_DATA));
 	if (op == ofi_op_atomic_compare || op == ofi_op_atomic_fetch ||
-	    op_flags & FI_DELIVERY_COMPLETE || total_len > SMR_MSG_DATA_LEN)
+	    op_flags & FI_DELIVERY_COMPLETE) {
+		*smr_flags |= SMR_RETURN_CMD;
 		return smr_proto_inject;
+	}
 
-	return smr_proto_inline;
+	return total_len > SMR_MSG_DATA_LEN ? smr_proto_inject :
+					      smr_proto_inline;
 }
 
 static ssize_t smr_generic_atomic(
@@ -168,18 +186,17 @@ static ssize_t smr_generic_atomic(
 			enum fi_op atomic_op, void *context, uint32_t op,
 			uint64_t op_flags)
 {
-	struct smr_cmd_entry *ce;
-	struct smr_cmd *cmd;
+	struct smr_cmd *ce, *cmd;
 	struct smr_region *peer_smr;
 	struct iovec iov[SMR_IOV_LIMIT];
 	struct iovec compare_iov[SMR_IOV_LIMIT];
 	struct iovec result_iov[SMR_IOV_LIMIT];
-	uint16_t smr_flags = 0;
 	int64_t tx_id, rx_id, pos;
 	int proto;
 	ssize_t ret;
 	size_t total_len;
 	uint64_t atomic_flags;
+	uint8_t smr_flags;
 
 	assert(count <= SMR_IOV_LIMIT);
 	assert(result_count <= SMR_IOV_LIMIT);
@@ -248,15 +265,8 @@ static ssize_t smr_generic_atomic(
 		break;
 	}
 
-	proto = smr_select_atomic_proto(op, total_len, op_flags);
-
-	if (proto == smr_proto_inline) {
-		cmd = &ce->cmd;
-		smr_do_atomic_inline(ep, peer_smr, tx_id, rx_id, ofi_op_atomic,
-				     op_flags, datatype, atomic_op,
-				     (struct ofi_mr **) desc, iov, count,
-				     total_len, cmd);
-	} else {
+	proto = smr_select_atomic_proto(op, total_len, op_flags, &smr_flags);
+	if (smr_flags & SMR_RETURN_CMD) {
 		if (smr_freestack_isempty(smr_cmd_stack(ep->region))) {
 			smr_cmd_queue_discard(ce, pos);
 			ret = -FI_EAGAIN;
@@ -265,8 +275,19 @@ static ssize_t smr_generic_atomic(
 
 		cmd = smr_freestack_pop(smr_cmd_stack(ep->region));
 		assert(cmd);
-		ce->ptr = smr_local_to_peer(ep, peer_smr, tx_id, rx_id,
-					    (uintptr_t) cmd);
+		ce->hdr.smr_flags = smr_flags;
+		ce->hdr.entry = smr_local_to_peer(ep, peer_smr, tx_id, rx_id,
+						  (uintptr_t) cmd);
+	} else {
+		cmd = ce;
+	}
+
+	if (proto == smr_proto_inline) {
+		smr_do_atomic_inline(ep, peer_smr, tx_id, rx_id, ofi_op_atomic,
+				     datatype, atomic_op,
+				     (struct ofi_mr **) desc, iov, count,
+				     total_len, smr_flags, cmd);
+	} else {
 		ret = smr_do_atomic_inject(ep, peer_smr, tx_id, rx_id, op,
 					   op_flags, datatype, atomic_op,
 					   (struct ofi_mr **) desc, iov, count,
@@ -276,21 +297,23 @@ static ssize_t smr_generic_atomic(
 					   compare_iov, compare_count,
 					   total_len, context, smr_flags, cmd);
 		if (ret) {
+			smr_freestack_push(smr_cmd_stack(ep->region), cmd);
 			smr_cmd_queue_discard(ce, pos);
 			goto unlock;
 		}
 	}
 
-	if (!cmd->hdr.tx_ctx) {
-		ret = smr_complete_tx(ep, context, op, op_flags);
-		if (ret) {
-			FI_WARN(&smr_prov, FI_LOG_EP_CTRL,
-				"unable to process tx completion\n");
-		}
-	}
-
 	smr_format_rma_ioc(cmd, rma_ioc, rma_count);
 	smr_cmd_queue_commit(ce, pos);
+
+	if (smr_flags & SMR_RETURN_CMD)
+		goto unlock;
+
+	ret = smr_complete_tx(ep, context, op, op_flags);
+	if (ret)
+		FI_WARN(&smr_prov, FI_LOG_EP_CTRL,
+			"unable to process tx completion\n");
+
 unlock:
 	ofi_genlock_unlock(&ep->util_ep.lock);
 	return ret;
@@ -362,8 +385,7 @@ static ssize_t smr_atomic_inject(
 			fi_addr_t dest_addr, uint64_t addr, uint64_t key,
 			enum fi_datatype datatype, enum fi_op op)
 {
-	struct smr_cmd_entry *ce;
-	struct smr_cmd *cmd;
+	struct smr_cmd *ce;
 	struct smr_ep *ep;
 	struct smr_region *peer_smr;
 	struct iovec iov;
@@ -371,7 +393,6 @@ static ssize_t smr_atomic_inject(
 	int64_t id, peer_id, pos;
 	ssize_t ret;
 	size_t total_len;
-	int proto;
 
 	ep = container_of(ep_fid, struct smr_ep, util_ep.ep_fid.fid);
 
@@ -413,38 +434,23 @@ static ssize_t smr_atomic_inject(
 	rma_ioc.key = key;
 
 	if (total_len <= SMR_MSG_DATA_LEN) {
-		proto = smr_proto_inline;
-		cmd = &ce->cmd;
 		smr_do_atomic_inline(ep, peer_smr, id, peer_id, ofi_op_atomic,
-				     0, datatype, op, NULL, &iov, 1, total_len,
-				     &ce->cmd);
+				     datatype, op, NULL, &iov, 1, total_len,
+				     0, ce);
 	} else {
-		proto = smr_proto_inject;
-		if (smr_freestack_isempty(smr_cmd_stack(ep->region))) {
-			smr_cmd_queue_discard(ce, pos);
-			ret = -FI_EAGAIN;
-			goto unlock;
-		}
-
-		cmd = smr_freestack_pop(smr_cmd_stack(ep->region));
-		assert(cmd);
-		ce->ptr = smr_local_to_peer(ep, peer_smr, id, peer_id,
-					    (uintptr_t) cmd);
 		ret = smr_do_atomic_inject(ep, peer_smr, id, peer_id,
 					   ofi_op_atomic, 0, datatype, op, NULL,
 					   &iov, 1, NULL, NULL, 0, NULL, NULL,
-					   0, total_len, NULL, 0, cmd);
+					   0, total_len, NULL, 0, ce);
 		if (ret) {
 			smr_cmd_queue_discard(ce, pos);
 			goto unlock;
 		}
 	}
 
-	smr_format_rma_ioc(cmd, &rma_ioc, 1);
+	smr_format_rma_ioc(ce, &rma_ioc, 1);
 	smr_cmd_queue_commit(ce, pos);
-
-	if (proto == smr_proto_inline)
-		ofi_ep_peer_tx_cntr_inc(&ep->util_ep, ofi_op_atomic);
+	ofi_ep_peer_tx_cntr_inc(&ep->util_ep, ofi_op_atomic);
 unlock:
 	ofi_genlock_unlock(&ep->util_ep.lock);
 	return ret;
