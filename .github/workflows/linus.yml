@@ -32,6 +32,10 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  # The reusable workflow posts a per-head "Linus verdict" check run so a
+  # reviewer can tell whether THIS commit was reviewed. A called workflow
+  # cannot elevate the caller token, so the scope is granted here.
+  checks: write
 
 jobs:
   linus:
