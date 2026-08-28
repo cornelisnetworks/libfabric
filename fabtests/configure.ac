@@ -77,6 +77,13 @@ AC_ARG_ENABLE([lpp],
 
 AM_CONDITIONAL([ENABLE_LPP], [test x"$enable_lpp" = x"yes"])
 
+AC_ARG_ENABLE([opx-tests],
+	[AS_HELP_STRING([--enable-opx-tests],
+		[Enable opx provider specific tests - default YES])],
+	[], [enable_opx_tests=yes])
+
+AM_CONDITIONAL([ENABLE_OPX], [test x"$enable_opx_tests" = x"yes"])
+
 AC_ARG_ENABLE([verbs],
 	[AS_HELP_STRING([--enable-verbs],
 		[Enable verbs provider specific tests - default YES])],
