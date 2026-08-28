@@ -215,7 +215,8 @@ AC_ARG_WITH([rocr],
              have_rocr=0
              AC_CHECK_HEADER([hsa/hsa.h],
                              [AC_DEFINE([HAVE_ROCR_RUNTIME_H], [1],
-                                        [Define to 1 if you have <hsa/hsa.h>])],
+                                        [Define to 1 if you have <hsa/hsa.h>])
+                                        have_rocr=1],
                              [AC_MSG_ERROR([<hsa/hsa.h> not found])])],
             [])
 
